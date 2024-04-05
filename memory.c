@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "memory.h"
 
 Memory mem = {0};
@@ -45,7 +46,7 @@ uint32_t read_word(uint32_t addr) {
         return *((uint32_t *)(mem.rom + (addr - 0x08000000)));
     }
 
-    fprintf(stderr, "[word] read to unmapped memory region: 0x%04X", addr);
+    fprintf(stderr, "[word] read to unmapped memory region: 0x%04X\n", addr);
     exit(1);
 }
 
@@ -58,6 +59,12 @@ uint32_t read_half_word(uint32_t addr) {
         return *((uint16_t *)(mem.rom + (addr - 0x08000000)));
     }
 
-    fprintf(stderr, "[half_word] read to unmapped memory region: 0x%04X", addr);
+    fprintf(stderr, "[half_word] read to unmapped memory region: 0x%04X\n", addr);
     exit(1);
+}
+
+void write_half_word(uint32_t addr, int16_t val) {
+    if (addr >= 0x04000000 && addr < 0x04000400) {
+        memcpy(mem.io_ram + (addr - 0x04000000), &val, 2);
+    }
 }

@@ -19,9 +19,20 @@ typedef uint32_t Instr;
 typedef bool Bit;
 
 typedef enum {
+    CC_UNSET    = 0,
+    CC_SET      = 1,
+    CC_UNMOD    = 2,
+} CCOpt;
+
+typedef enum {
     Branch,
     BlockDataTransfer,
-    ALU
+    ALU,
+    STR_LDR,
+    MUL,
+    MULL,
+    SWP,
+    BX
 } InstrType;
 
 typedef enum {
@@ -84,26 +95,6 @@ RegisterSet registers = {0};
 
 Instr pipeline = 0;
 
-static inline Bit cond(Instr instr) {
-    switch (instr >> 28) {
-    case 0x0: return ZERO_FLAG;
-    case 0x1: return !ZERO_FLAG;
-    case 0x2: return CARRY_FLAG;
-    case 0x3: return !CARRY_FLAG;
-    case 0x4: return SIGN_FLAG;
-    case 0x5: return !SIGN_FLAG;
-    case 0x6: return OVERFLOW_FLAG;
-    case 0x7: return !OVERFLOW_FLAG;
-    case 0x8: return CARRY_FLAG & !ZERO_FLAG;
-    case 0x9: return !CARRY_FLAG | ZERO_FLAG;
-    case 0xA: return SIGN_FLAG == OVERFLOW_FLAG;
-    case 0xB: return SIGN_FLAG != OVERFLOW_FLAG;
-    case 0xC: return !ZERO_FLAG & (SIGN_FLAG == OVERFLOW_FLAG);
-    case 0xD: return ZERO_FLAG | (SIGN_FLAG != OVERFLOW_FLAG);
-    case 0xE: return true;
-    }
-}
-
 static inline char* cond_to_cstr(Instr instr) {
     switch (instr >> 28) {
     case 0x0: return "EQ";
@@ -120,7 +111,7 @@ static inline char* cond_to_cstr(Instr instr) {
     case 0xB: return "LT";
     case 0xC: return "GT";
     case 0xD: return "LE";
-    case 0xE: return "AL";
+    case 0xE: return "";
     }
 }
 
@@ -151,6 +142,26 @@ static inline char* register_to_cstr(uint8_t r) {
     case 13: return "r13";
     case 14: return "r14";
     case 15: return "r15";
+    }
+}
+
+static inline Bit cond(Instr instr) {
+    switch (instr >> 28) {
+    case 0x0: return ZERO_FLAG;
+    case 0x1: return !ZERO_FLAG;
+    case 0x2: return CARRY_FLAG;
+    case 0x3: return !CARRY_FLAG;
+    case 0x4: return SIGN_FLAG;
+    case 0x5: return !SIGN_FLAG;
+    case 0x6: return OVERFLOW_FLAG;
+    case 0x7: return !OVERFLOW_FLAG;
+    case 0x8: return CARRY_FLAG & !ZERO_FLAG;
+    case 0x9: return !CARRY_FLAG | ZERO_FLAG;
+    case 0xA: return SIGN_FLAG == OVERFLOW_FLAG;
+    case 0xB: return SIGN_FLAG != OVERFLOW_FLAG;
+    case 0xC: return !ZERO_FLAG & (SIGN_FLAG == OVERFLOW_FLAG);
+    case 0xD: return ZERO_FLAG | (SIGN_FLAG != OVERFLOW_FLAG);
+    case 0xE: return true;
     }
 }
 
@@ -286,6 +297,48 @@ static inline void set_register(uint8_t r, int32_t v) {
     }
 }
 
+static inline void set_cc(CCOpt n, CCOpt z, CCOpt c, CCOpt v) {
+    switch (PROCESSOR_MODE) {
+    case User:
+    case System:
+        if (n != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (n << 31);
+        if (z != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (z << 30);
+        if (c != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (c << 29);
+        if (v != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (v << 28);
+        break;
+    case FIQ:
+        if (n != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (n << 31);
+        if (z != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (z << 30);
+        if (c != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (c << 29);
+        if (v != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (v << 28);
+        break;
+    case IRQ:
+        if (n != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (n << 31);
+        if (z != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (z << 30);
+        if (c != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (c << 29);
+        if (v != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (v << 28);
+        break;
+    case Supervisor:
+        if (n != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (n << 31);
+        if (z != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (z << 30);
+        if (c != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (c << 29);
+        if (v != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (v << 28);
+        break;
+    case Abort:
+        if (n != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (n << 31);
+        if (z != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (z << 30);
+        if (c != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (c << 29);
+        if (v != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (v << 28);
+        break;
+    case Undefined:
+        if (n != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (n << 31);
+        if (z != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (z << 30);
+        if (c != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (c << 29);
+        if (v != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (v << 28);
+        break;
+    }
+}
+
 static inline Instr fetch() {
     Instr instr;
 
@@ -305,26 +358,36 @@ static inline InstrType decode(Instr instr) {
 
     switch ((instr >> 25) & 0x7) {
     case 0x0:
-        if ((instr >> 7) & 0x1 == 0) exit(1); // BX
+        if (((instr >> 7) & 0x1) == 0) return BX;
 
-        
+        switch ((instr >> 5) & 0x3) {
+        case 0:
+            switch ((instr >> 23) & 0x3) {
+            case 0: return MUL;
+            case 1: return MULL;
+            case 2: return SWP;
+            }
+        case 1:
+        case 2:
+            return STR_LDR;
+        }
 
-        printf("INSTR: %08X\n", instr);
+        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
         exit(1);
     case 0x1: return ALU;
     case 0x2:
-        fprintf(stderr, "unhandled encoding for 0x%04X???\n", instr);
+        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
         exit(1);
     case 0x3:
-        fprintf(stderr, "unhandled encoding for 0x%04X\n", instr);
+        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
         exit(1);
     case 0x4: return BlockDataTransfer;
     case 0x5: return Branch;
     case 0x6:
-        fprintf(stderr, "unhandled encoding for 0x%04X\n", instr);
+        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
         exit(1);
     case 0x7:
-        fprintf(stderr, "unhandled encoding for 0x%04X\n", instr);
+        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
         exit(1);
     }
 }
@@ -332,7 +395,7 @@ static inline InstrType decode(Instr instr) {
 static inline void execute(Instr instr, InstrType type) {
     bool flush_pipeline = false;
 
-    printf("[%s] (%08X) %08X ", THUMB_ACTIVATED ? "THUMB" : "ARM", registers.r15, instr);
+    printf("[%s] (%08X) %08X ", THUMB_ACTIVATED ? "THUMB" : "ARM", registers.r15 - 8, instr, type);
 
     if (cond(instr)) {
         switch (type) {
@@ -342,13 +405,11 @@ static inline void execute(Instr instr, InstrType type) {
                 fprintf(stderr, "branch not implemented\n");
                 exit(1);
             } else {
-                int32_t offset = instr & 0xFFFFFF;
-                registers.r15 += offset * 4;
+                int32_t offset = (instr & 0xFFFFFF) << 8;
+                registers.r15 += (offset >> 8) * 4;
             }
             flush_pipeline = true;
-
             printf("B%s #%08X\n", cond_to_cstr(instr), registers.r15);
-
             break;
         }
         case BlockDataTransfer: {
@@ -369,6 +430,7 @@ static inline void execute(Instr instr, InstrType type) {
 
             printf("%s%s%s %s, <reglist>$%04X\n", l ? "LDM" : "STM", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn), reg_list);
             exit(1);
+            break;
         }
         case ALU: {
             uint8_t opcode = (instr >> 21) & 0xF;
@@ -425,9 +487,12 @@ static inline void execute(Instr instr, InstrType type) {
             case 0x9:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
-            case 0xA:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
+            case 0xA: {
+                int32_t result = get_register_val(rn) - operand2;
+                set_cc(result < 0, result == 0, operand2 > result, operand2 > result);
+                printf("CMP%s %s, #%08X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2);
+                break;
+            }
             case 0xB:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
@@ -445,6 +510,89 @@ static inline void execute(Instr instr, InstrType type) {
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
             }
+            break;
+        }
+        case STR_LDR: {
+            Bit p = (instr >> 24) & 1;
+            Bit u = (instr >> 23) & 1;
+            Bit i = (instr >> 22) & 1;
+            Bit w = (instr >> 21) & 1;
+            Bit l = (instr >> 20) & 1;
+
+            uint8_t rn = (instr >> 16) & 0xF;
+            uint8_t rd = (instr >> 12) & 0xF;
+
+            int32_t offset = i ? ((((instr >> 8) & 0xF) << 4) | (instr & 0xF)) : get_register_val(instr & 0xF);
+            if (u) offset = -offset;
+
+            uint32_t address = get_register_val(rn) + offset;
+
+            if (l) {
+                switch ((instr >> 5) & 0x3) {
+                case 1:
+                    if (p) {
+                        set_register(rd, read_half_word(address));
+                    } else {
+                        set_register(rd, read_half_word((uint32_t)get_register_val(rn)));
+                    }
+                    printf("LDR%sH ", cond_to_cstr(instr));
+                    break;
+                case 2:
+                    printf("LDR%sSB ", cond_to_cstr(instr));
+                    break;
+                case 3:
+                    printf("LDR%sSH ", cond_to_cstr(instr));
+                    break;
+                }
+            } else {
+                switch ((instr >> 5) & 0x3) {
+                case 1:
+                    if (p) {
+                        write_half_word(address, get_register_val(rd));
+                    } else {
+                        write_half_word((uint32_t)get_register_val(rn), get_register_val(rd));
+                    }
+                    printf("STR%sH ", cond_to_cstr(instr));
+                    break;
+                case 2:
+                    printf("LDR%sD ", cond_to_cstr(instr));
+                    break;
+                case 3:
+                    printf("STR%sD ", cond_to_cstr(instr));
+                    break;
+                }
+            }
+
+            // post indexing implies writeback
+            if ((p && w) || !p) set_register(rn, address);
+
+            printf("%s, ", register_to_cstr(rd));
+            if (p) {
+                if (i) {
+                    printf("[%s", register_to_cstr(rn));
+                    if (offset) {
+                        printf(", #%08X]", u ? -offset : offset);
+                    } else {
+                        printf("]");
+                    }
+                } else {
+                    printf(", %s]", register_to_cstr(instr & 0xF));
+                }
+
+                if (w) {
+                    printf("\n");
+                } else {
+                    printf("!\n");
+                }
+            } else {
+                printf("[%s], ", register_to_cstr(rn));
+                if (i) {
+                    printf("#%08X\n", u ? -offset : offset);
+                } else {
+                    printf(", %s\n", register_to_cstr(instr & 0xF));
+                }
+            }
+            break;
         }
         }
 
@@ -467,15 +615,16 @@ void start(char *rom_file, char *bios_file) {
     load_bios(bios_file);
     load_rom(rom_file);
 
+    // initialize call stack
     registers.r13_svc = 0x03007FE0;
     registers.r13_irq = 0x03007FA0;
     registers.r13 = 0x03007F00;
 
+    // initialize PC and CPU mode
     registers.r15 = 0x08000000;
+    registers.cspr |= System;
 
-    tick_cpu();
-    tick_cpu();
-    tick_cpu();
-    tick_cpu();
-    tick_cpu();
+    for (int i = 0; i < 635; i++) {
+        tick_cpu();
+    }
 }
