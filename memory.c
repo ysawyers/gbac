@@ -55,6 +55,10 @@ uint32_t read_half_word(uint32_t addr) {
         return *((uint16_t *)(mem.bios + addr));
     }
 
+    if (addr >= 0x07000000 && addr < 0x08000000) {
+        return *((uint16_t *)((mem.rom + ((addr - 0x07000000) % 0x400))));
+    }
+
     if (addr >= 0x08000000 && addr < 0xA000000) {
         return *((uint16_t *)(mem.rom + (addr - 0x08000000)));
     }

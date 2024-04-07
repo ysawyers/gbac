@@ -13,10 +13,10 @@
 #define CARRY_FLAG    (registers.cspr >> 29 & 1)
 #define OVERFLOW_FLAG (registers.cspr >> 28 & 1)
 
-#define ROR(nn, Is) ((nn) >> (Is) | (nn) << (32 - (Is)))
+#define ROR(n, shift) ((n) >> (shift) | (n) << (32 - (shift)))
 
-typedef uint32_t Instr;
-typedef bool Bit;
+typedef uint32_t instr;
+typedef bool bit;
 
 typedef enum {
     CC_UNSET    = 0,
@@ -26,13 +26,14 @@ typedef enum {
 
 typedef enum {
     Branch,
+    BranchExchange,
     BlockDataTransfer,
-    ALU,
-    STR_LDR,
+    HalfwordDataTransfer,
+    SingleDataTransfer,
+    DataProcessing,
     MUL,
     MULL,
     SWP,
-    BX
 } InstrType;
 
 typedef enum {
@@ -93,9 +94,9 @@ typedef struct {
 
 RegisterSet registers = {0};
 
-Instr pipeline = 0;
+instr pipeline = 0;
 
-static inline char* cond_to_cstr(Instr instr) {
+static inline char* cond_to_cstr(instr instr) {
     switch (instr >> 28) {
     case 0x0: return "EQ";
     case 0x1: return "NE";
@@ -115,7 +116,7 @@ static inline char* cond_to_cstr(Instr instr) {
     }
 }
 
-static inline char* amod_to_cstr(Bit p, Bit u) {
+static inline char* amod_to_cstr(bit p, bit u) {
     switch ((p << 1) | u) {
     case 0: return "DA";
     case 1: return "IA";
@@ -145,7 +146,7 @@ static inline char* register_to_cstr(uint8_t r) {
     }
 }
 
-static inline Bit cond(Instr instr) {
+static inline bit cond(instr instr) {
     switch (instr >> 28) {
     case 0x0: return ZERO_FLAG;
     case 0x1: return !ZERO_FLAG;
@@ -158,9 +159,9 @@ static inline Bit cond(Instr instr) {
     case 0x8: return CARRY_FLAG & !ZERO_FLAG;
     case 0x9: return !CARRY_FLAG | ZERO_FLAG;
     case 0xA: return SIGN_FLAG == OVERFLOW_FLAG;
-    case 0xB: return SIGN_FLAG != OVERFLOW_FLAG;
-    case 0xC: return !ZERO_FLAG & (SIGN_FLAG == OVERFLOW_FLAG);
-    case 0xD: return ZERO_FLAG | (SIGN_FLAG != OVERFLOW_FLAG);
+    case 0xB: return SIGN_FLAG ^ OVERFLOW_FLAG;
+    case 0xC: return !ZERO_FLAG && (SIGN_FLAG == OVERFLOW_FLAG);
+    case 0xD: return ZERO_FLAG || (SIGN_FLAG ^ OVERFLOW_FLAG);
     case 0xE: return true;
     }
 }
@@ -301,46 +302,46 @@ static inline void set_cc(CCOpt n, CCOpt z, CCOpt c, CCOpt v) {
     switch (PROCESSOR_MODE) {
     case User:
     case System:
-        if (n != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (n << 31);
-        if (z != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (z << 30);
-        if (c != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (c << 29);
-        if (v != CC_UNMOD) registers.cspr = (registers.cspr & (~(1 << n))) | (v << 28);
+        if (n != CC_UNMOD) registers.cspr = n ? (1 << 31) | registers.cspr : ~(1 << 31) & registers.cspr;
+        if (z != CC_UNMOD) registers.cspr = z ? (1 << 30) | registers.cspr : ~(1 << 30) & registers.cspr;
+        if (c != CC_UNMOD) registers.cspr = c ? (1 << 29) | registers.cspr : ~(1 << 29) & registers.cspr;
+        if (v != CC_UNMOD) registers.cspr = v ? (1 << 28) | registers.cspr : ~(1 << 28) & registers.cspr;
         break;
     case FIQ:
-        if (n != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (n << 31);
-        if (z != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (z << 30);
-        if (c != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (c << 29);
-        if (v != CC_UNMOD) registers.spsr_fiq = (registers.spsr_fiq & (~(1 << n))) | (v << 28);
+        if (n != CC_UNMOD) registers.spsr_fiq = n ? (1 << 31) | registers.spsr_fiq : ~(1 << 31) & registers.spsr_fiq;
+        if (z != CC_UNMOD) registers.spsr_fiq = z ? (1 << 30) | registers.spsr_fiq : ~(1 << 30) & registers.spsr_fiq;
+        if (c != CC_UNMOD) registers.spsr_fiq = c ? (1 << 29) | registers.spsr_fiq : ~(1 << 29) & registers.spsr_fiq;
+        if (v != CC_UNMOD) registers.spsr_fiq = v ? (1 << 28) | registers.spsr_fiq : ~(1 << 28) & registers.spsr_fiq;
         break;
     case IRQ:
-        if (n != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (n << 31);
-        if (z != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (z << 30);
-        if (c != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (c << 29);
-        if (v != CC_UNMOD) registers.spsr_irq = (registers.spsr_irq & (~(1 << n))) | (v << 28);
+        if (n != CC_UNMOD) registers.spsr_irq = n ? (1 << 31) | registers.spsr_irq : ~(1 << 31) & registers.spsr_irq;
+        if (z != CC_UNMOD) registers.spsr_irq = z ? (1 << 30) | registers.spsr_irq : ~(1 << 30) & registers.spsr_irq;
+        if (c != CC_UNMOD) registers.spsr_irq = c ? (1 << 29) | registers.spsr_irq : ~(1 << 29) & registers.spsr_irq;
+        if (v != CC_UNMOD) registers.spsr_irq = v ? (1 << 28) | registers.spsr_irq : ~(1 << 28) & registers.spsr_irq;
         break;
     case Supervisor:
-        if (n != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (n << 31);
-        if (z != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (z << 30);
-        if (c != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (c << 29);
-        if (v != CC_UNMOD) registers.spsr_svc = (registers.spsr_svc & (~(1 << n))) | (v << 28);
+        if (n != CC_UNMOD) registers.spsr_svc = n ? (1 << 31) | registers.spsr_svc : ~(1 << 31) & registers.spsr_svc;
+        if (z != CC_UNMOD) registers.spsr_svc = z ? (1 << 30) | registers.spsr_svc : ~(1 << 30) & registers.spsr_svc;
+        if (c != CC_UNMOD) registers.spsr_svc = c ? (1 << 29) | registers.spsr_svc : ~(1 << 29) & registers.spsr_svc;
+        if (v != CC_UNMOD) registers.spsr_svc = v ? (1 << 28) | registers.spsr_svc : ~(1 << 28) & registers.spsr_svc;
         break;
     case Abort:
-        if (n != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (n << 31);
-        if (z != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (z << 30);
-        if (c != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (c << 29);
-        if (v != CC_UNMOD) registers.spsr_abt = (registers.spsr_abt & (~(1 << n))) | (v << 28);
+        if (n != CC_UNMOD) registers.spsr_abt = n ? (1 << 31) | registers.spsr_abt : ~(1 << 31) & registers.spsr_abt;
+        if (z != CC_UNMOD) registers.spsr_abt = z ? (1 << 30) | registers.spsr_abt : ~(1 << 30) & registers.spsr_abt;
+        if (c != CC_UNMOD) registers.spsr_abt = c ? (1 << 29) | registers.spsr_abt : ~(1 << 29) & registers.spsr_abt;
+        if (v != CC_UNMOD) registers.spsr_abt = v ? (1 << 28) | registers.spsr_abt : ~(1 << 28) & registers.spsr_abt;
         break;
     case Undefined:
-        if (n != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (n << 31);
-        if (z != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (z << 30);
-        if (c != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (c << 29);
-        if (v != CC_UNMOD) registers.spsr_und = (registers.spsr_und & (~(1 << n))) | (v << 28);
+        if (n != CC_UNMOD) registers.spsr_und = n ? (1 << 31) | registers.spsr_und : ~(1 << 31) & registers.spsr_und;
+        if (z != CC_UNMOD) registers.spsr_und = z ? (1 << 30) | registers.spsr_und : ~(1 << 30) & registers.spsr_und;
+        if (c != CC_UNMOD) registers.spsr_und = c ? (1 << 29) | registers.spsr_und : ~(1 << 29) & registers.spsr_und;
+        if (v != CC_UNMOD) registers.spsr_und = v ? (1 << 28) | registers.spsr_und : ~(1 << 28) & registers.spsr_und;
         break;
     }
 }
 
-static inline Instr fetch() {
-    Instr instr;
+static inline instr fetch() {
+    instr instr;
 
     if (THUMB_ACTIVATED) {
         instr = read_half_word(registers.r15);
@@ -353,46 +354,37 @@ static inline Instr fetch() {
     return instr;
 }
 
-static inline InstrType decode(Instr instr) {
+static inline InstrType decode_arm(instr instr) {
     pipeline = fetch();
 
     switch ((instr >> 25) & 0x7) {
     case 0x0:
-        if (((instr >> 7) & 0x1) == 0) return BX;
-
-        switch ((instr >> 5) & 0x3) {
-        case 0:
-            switch ((instr >> 23) & 0x3) {
-            case 0: return MUL;
-            case 1: return MULL;
-            case 2: return SWP;
-            }
-        case 1:
-        case 2:
-            return STR_LDR;
+        switch ((instr >> 4) & 0xF) {
+        case 0x1:
+            if (((instr >> 8) & 0xF) == 0xF) return BranchExchange;
+            return DataProcessing;
+        case 0x9:
+            fprintf(stderr, "unhandled decoding: %08X\n", instr);
+            exit(1);
+        case 0xB:
+        case 0xD: return HalfwordDataTransfer;
+        default: return DataProcessing;
         }
-
-        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
-        exit(1);
-    case 0x1: return ALU;
+    case 0x1: return DataProcessing;
     case 0x2:
-        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
-        exit(1);
-    case 0x3:
-        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
-        exit(1);
+    case 0x3: return SingleDataTransfer;
     case 0x4: return BlockDataTransfer;
     case 0x5: return Branch;
     case 0x6:
-        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
+        fprintf(stderr, "coprocessor data transfer\n");
         exit(1);
     case 0x7:
-        fprintf(stderr, "unhandled encoding for 0x%08X\n", instr);
+        fprintf(stderr, "unhandled decoding: %08X\n", instr);
         exit(1);
     }
 }
 
-static inline void execute(Instr instr, InstrType type) {
+static inline void execute(instr instr, InstrType type) {
     bool flush_pipeline = false;
 
     printf("[%s] (%08X) %08X ", THUMB_ACTIVATED ? "THUMB" : "ARM", registers.r15 - 8, instr, type);
@@ -400,7 +392,7 @@ static inline void execute(Instr instr, InstrType type) {
     if (cond(instr)) {
         switch (type) {
         case Branch: {
-            Bit with_link = (instr >> 24) & 1;
+            bit with_link = (instr >> 24) & 1;
             if (with_link & !THUMB_ACTIVATED) {
                 fprintf(stderr, "branch not implemented\n");
                 exit(1);
@@ -409,15 +401,15 @@ static inline void execute(Instr instr, InstrType type) {
                 registers.r15 += (offset >> 8) * 4;
             }
             flush_pipeline = true;
-            printf("B%s #%08X\n", cond_to_cstr(instr), registers.r15);
+            printf("B%s #0x%X\n", cond_to_cstr(instr), registers.r15);
             break;
         }
         case BlockDataTransfer: {
-            Bit p = (instr >> 24) & 1;
-            Bit u = (instr >> 23) & 1;
-            Bit s = (instr >> 22) & 1;
-            Bit w = (instr >> 21) & 1;
-            Bit l = (instr >> 21) & 1;
+            bit p = (instr >> 24) & 1;
+            bit u = (instr >> 23) & 1;
+            bit s = (instr >> 22) & 1;
+            bit w = (instr >> 21) & 1;
+            bit l = (instr >> 21) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint16_t reg_list = instr & 0xFFFF;
@@ -432,21 +424,47 @@ static inline void execute(Instr instr, InstrType type) {
             exit(1);
             break;
         }
-        case ALU: {
+        case DataProcessing: {
             uint8_t opcode = (instr >> 21) & 0xF;
-            Bit i = (instr >> 25) & 1;
-            Bit s = (instr >> 20) & 1;
+            bit i = (instr >> 25) & 1;
+            bit s = (instr >> 20) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
-            uint32_t operand2 = instr & 0xFFF;
+            uint32_t operand2;
 
             if (i) {
-                operand2 = ROR(operand2 & 0xFF, ((operand2 & 0xF00) >> 8) * 2);
+                operand2 = ROR(instr & 0xFF, ((instr & 0xF00) >> 8) * 2);
             } else {
-                fprintf(stderr, "MOV with i not set not implemented 0x%01X\n", opcode);
-                exit(1);
+                uint8_t shift_type = (instr >> 5) & 0x3;
+                bit r = (instr >> 4) & 1;
+                uint8_t rm = instr & 0xF;
+
+                uint8_t shift_amount;
+
+                if (r) {
+                    printf("yes\n");
+                    exit(1);
+                } else {
+                    shift_amount = (instr >> 7) & 0x1F;
+                }
+
+                switch (shift_type) {
+                case 0:
+                    operand2 = get_register_val(rm) << shift_amount;
+                    printf("LSL %s, %s, #%d\n", register_to_cstr(rd), register_to_cstr(rm), shift_amount);
+                    break;
+                case 1:
+                    printf("LSR\n");
+                    exit(1);
+                case 2: 
+                    printf("ASR\n");
+                    exit(1);
+                case 3:
+                    printf("ROR\n");
+                    exit(1);
+                }
             }
 
             switch (opcode) {
@@ -465,11 +483,11 @@ static inline void execute(Instr instr, InstrType type) {
             case 0x4: {
                 int32_t result = get_register_val(rn) + operand2;
                 if (s) {
-                    printf("TODO cspr flags for here\n");
+                    printf("TODO set flags for ADD ALU\n");
                     exit(1);
                 }
                 set_register(rd, result);
-                printf("ADD%s %s, %s, #%08X\n", cond_to_cstr(instr), register_to_cstr(rd), register_to_cstr(rn), operand2);
+                printf("ADD%s %s, %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rd), register_to_cstr(rn), operand2);
                 break;
             }
             case 0x5:
@@ -489,8 +507,8 @@ static inline void execute(Instr instr, InstrType type) {
                 exit(1);
             case 0xA: {
                 int32_t result = get_register_val(rn) - operand2;
-                set_cc(result < 0, result == 0, operand2 > result, operand2 > result);
-                printf("CMP%s %s, #%08X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2);
+                set_cc(result < 0, result == 0, result > 0, operand2 < 0 && get_register_val(rn) < 0 && result > 0);
+                printf("CMP%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2);
                 break;
             }
             case 0xB:
@@ -501,7 +519,11 @@ static inline void execute(Instr instr, InstrType type) {
                 exit(1);
             case 0xD:
                 set_register(rd, operand2);
-                printf("MOV%s %s, #%08X\n", cond_to_cstr(instr), register_to_cstr(rd), operand2);
+                if (s) {
+                    printf("TODO set flags for MOV ALU\n");
+                    exit(1);
+                };
+                if (i) printf("MOV%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rd), operand2);
                 break;
             case 0xE:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
@@ -512,12 +534,12 @@ static inline void execute(Instr instr, InstrType type) {
             }
             break;
         }
-        case STR_LDR: {
-            Bit p = (instr >> 24) & 1;
-            Bit u = (instr >> 23) & 1;
-            Bit i = (instr >> 22) & 1;
-            Bit w = (instr >> 21) & 1;
-            Bit l = (instr >> 20) & 1;
+        case HalfwordDataTransfer: {
+            bit p = (instr >> 24) & 1;
+            bit u = (instr >> 23) & 1;
+            bit i = (instr >> 22) & 1;
+            bit w = (instr >> 21) & 1;
+            bit l = (instr >> 20) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
@@ -571,7 +593,7 @@ static inline void execute(Instr instr, InstrType type) {
                 if (i) {
                     printf("[%s", register_to_cstr(rn));
                     if (offset) {
-                        printf(", #%08X]", u ? -offset : offset);
+                        printf(", #0x%X]", u ? -offset : offset);
                     } else {
                         printf("]");
                     }
@@ -587,13 +609,15 @@ static inline void execute(Instr instr, InstrType type) {
             } else {
                 printf("[%s], ", register_to_cstr(rn));
                 if (i) {
-                    printf("#%08X\n", u ? -offset : offset);
+                    printf("#0x%X\n", u ? -offset : offset);
                 } else {
                     printf(", %s\n", register_to_cstr(instr & 0xF));
                 }
             }
             break;
         }
+        default:
+            exit(1);
         }
 
         if (flush_pipeline) pipeline = 0;
@@ -604,10 +628,10 @@ static inline void execute(Instr instr, InstrType type) {
 
 static inline void tick_cpu() {
     if (!pipeline) {
-        Instr instr = fetch();
-        execute(instr, decode(instr));
+        instr instr = fetch();
+        execute(instr, decode_arm(instr));
     } else {
-        execute(pipeline, decode(pipeline));
+        execute(pipeline, decode_arm(pipeline));
     }
 }
 
@@ -624,7 +648,7 @@ void start(char *rom_file, char *bios_file) {
     registers.r15 = 0x08000000;
     registers.cspr |= System;
 
-    for (int i = 0; i < 635; i++) {
+    for (int i = 0; i < 11; i++) {
         tick_cpu();
     }
 }
