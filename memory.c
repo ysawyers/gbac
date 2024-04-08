@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "memory.h"
+#include "ppu.h"
 
 Memory mem = {0};
 
@@ -67,8 +68,17 @@ uint32_t read_half_word(uint32_t addr) {
     exit(1);
 }
 
-void write_half_word(uint32_t addr, int16_t val) {
-    if (addr >= 0x04000000 && addr < 0x04000400) {
-        memcpy(mem.io_ram + (addr - 0x04000000), &val, 2);
+void write_half_word(uint32_t addr, uint16_t val) {
+    if (addr >= 0x04000000 && addr <= 0x04000054) {
+        ppu_set_register(addr, val);
+        return;
     }
+
+    if (addr >= 0x6000000 && addr < 0x06018000) {
+        *(uint16_t *)(vram + (addr - 0x6000000)) = val;
+        return;
+    }
+
+    fprintf(stderr, "[half_word] write to unmapped memory region: 0x%04X\n", addr);
+    exit(1);
 }
