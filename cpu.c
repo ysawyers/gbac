@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <string.h>
 #include "cpu.h"
-#include "ppu.h"
 #include "memory.h"
 
 #define CC_UNSET 0
@@ -527,7 +526,7 @@ static inline int execute(uint32_t instr, InstrType type) {
         }
         case HalfwordDataTransfer: {
             bit p = (instr >> 24) & 1;
-            bit u = (instr >> 23) & 1;
+            bit u = (instr >> 23) & 1; // if unset offset is negative (subtracted from base)
             bit i = (instr >> 22) & 1;
             bit w = (instr >> 21) & 1;
             bit l = (instr >> 20) & 1;
@@ -536,7 +535,7 @@ static inline int execute(uint32_t instr, InstrType type) {
             uint8_t rd = (instr >> 12) & 0xF;
 
             int32_t offset = i ? ((((instr >> 8) & 0xF) << 4) | (instr & 0xF)) : get_register_val(instr & 0xF);
-            if (u) offset = -offset;
+            if (!u) offset = -offset;
 
             uint32_t address = get_register_val(rn) + offset;
 
@@ -584,7 +583,7 @@ static inline int execute(uint32_t instr, InstrType type) {
                 if (i) {
                     DEBUG_PRINT(("[%s", register_to_cstr(rn)))
                     if (offset) {
-                        DEBUG_PRINT((", #0x%X]", u ? -offset : offset))
+                        DEBUG_PRINT((", #0x%X]", !u ? -offset : offset))
                     } else {
                         DEBUG_PRINT(("]"))
                     }
@@ -600,7 +599,7 @@ static inline int execute(uint32_t instr, InstrType type) {
             } else {
                 DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
                 if (i) {
-                    DEBUG_PRINT(("#0x%X\n", u ? -offset : offset))
+                    DEBUG_PRINT(("#0x%X\n", !u ? -offset : offset))
                 } else {
                     DEBUG_PRINT((", %s\n", register_to_cstr(instr & 0xF)))
                 }
@@ -614,7 +613,6 @@ static inline int execute(uint32_t instr, InstrType type) {
 
         if (flush_pipeline) pipeline = 0;
     } else {
-        cycles = 1;
         DEBUG_PRINT(("\n"));
     }
 
@@ -630,7 +628,7 @@ static inline int tick_cpu() {
     }
 }
 
-void start(char *rom_file, char *bios_file) {
+void init_GBA(char *rom_file, char *bios_file) {
     load_bios(bios_file);
     load_rom(rom_file);
 
@@ -642,11 +640,17 @@ void start(char *rom_file, char *bios_file) {
     // initialize PC and CPU mode
     registers.r15 = 0x08000000;
     registers.cspr |= System;
+}
 
-    for (int i = 0; i < 0xFFFFFF; i++) {
+uint16_t* render_frame(void) {
+    int total_cycles = 0;
+    while (total_cycles < 280896) {
         int cycles = tick_cpu();
         for (int j = 0; j < cycles; j++) {
             tick_ppu();
         }
+        total_cycles += cycles;
     }
+
+    return frame;
 }

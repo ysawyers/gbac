@@ -2,9 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "memory.h"
-#include "ppu.h"
 
-Memory mem = {0};
+uint8_t bios[0x4000] = {0};
+uint8_t external_wram[0x4000] = {0};
+uint8_t internal_wram[0x8000] = {0};
+uint8_t rom[0x2000000] = {0};
 
 void load_bios(char *bios_file) {
     FILE *fp = fopen(bios_file, "rb");
@@ -17,7 +19,7 @@ void load_bios(char *bios_file) {
     size_t size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    fread(mem.bios, sizeof(uint8_t), size, fp);
+    fread(bios, sizeof(uint8_t), size, fp);
 
     fclose(fp);
 }
@@ -33,18 +35,18 @@ void load_rom(char *rom_file) {
     size_t size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    fread(mem.rom, sizeof(uint8_t), size, fp);
+    fread(rom, sizeof(uint8_t), size, fp);
 
     fclose(fp);
 }
 
 uint32_t read_word(uint32_t addr) {
     if (addr < 0x4000) {
-        return *((uint32_t *)(mem.bios + addr));
+        return *((uint32_t *)(bios + addr));
     }
 
     if (addr >= 0x08000000 && addr < 0xA000000) {
-        return *((uint32_t *)(mem.rom + (addr - 0x08000000)));
+        return *((uint32_t *)(rom + (addr - 0x08000000)));
     }
 
     fprintf(stderr, "[word] read to unmapped memory region: 0x%04X\n", addr);
@@ -53,15 +55,15 @@ uint32_t read_word(uint32_t addr) {
 
 uint32_t read_half_word(uint32_t addr) {
     if (addr < 0x4000) {
-        return *((uint16_t *)(mem.bios + addr));
+        return *((uint16_t *)(bios + addr));
     }
 
     if (addr >= 0x07000000 && addr < 0x08000000) {
-        return *((uint16_t *)((mem.rom + ((addr - 0x07000000) % 0x400))));
+        return *((uint16_t *)((rom + ((addr - 0x07000000) % 0x400))));
     }
 
     if (addr >= 0x08000000 && addr < 0xA000000) {
-        return *((uint16_t *)(mem.rom + (addr - 0x08000000)));
+        return *((uint16_t *)(rom + (addr - 0x08000000)));
     }
 
     fprintf(stderr, "[half_word] read to unmapped memory region: 0x%04X\n", addr);
@@ -74,7 +76,13 @@ void write_half_word(uint32_t addr, uint16_t val) {
         return;
     }
 
-    if (addr >= 0x6000000 && addr < 0x06018000) {
+    if (addr >= 0x05000000 && addr <= 0x5FFFFFF) {
+        *(uint16_t *)(pallete_ram + ((addr - 0x05000000) % 0x400)) = val;
+        return;
+    }
+
+    // be smarter here.
+    if (addr >= 0x6000000 && addr <= 0x06017FFF) {
         *(uint16_t *)(vram + (addr - 0x6000000)) = val;
         return;
     }

@@ -9,6 +9,7 @@
 #ifndef CPU_H
 #define CPU_H
 
-void start(char *rom_file, char *bios_file);
+void init_GBA(char *rom_file, char *bios_file);
+uint16_t* render_frame(void);
 
 #endif

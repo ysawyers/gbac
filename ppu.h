@@ -3,7 +3,11 @@
 
 #include <stdint.h>
 
+extern uint16_t frame[160][240];
+
 extern uint8_t vram[0x18000];
+extern uint8_t oam[0x400];
+extern uint8_t pallete_ram[0x400];
 
 void tick_ppu(void);
 

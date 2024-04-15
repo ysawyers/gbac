@@ -1,16 +1,7 @@
 #ifndef MEMORY_H
 #define MEMORY_H
 
-typedef struct {
-    uint8_t bios[0x4000];
-    uint8_t external_wram[0x4000];
-    uint8_t internal_wram[0x8000];
-    uint8_t rom[0x2000000];
-
-    uint8_t pallete_ram[0x400];
-    uint8_t oam[0x400];
-    uint8_t io_ram[0x400];
-} Memory;
+#include "ppu.h"
 
 void load_bios(char *bios_file);
 void load_rom(char *rom_file);
