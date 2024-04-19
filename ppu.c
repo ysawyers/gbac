@@ -15,11 +15,11 @@
 #define DCNT_BG3 ((reg_dispcnt >> 0xB) & 1)
 #define DCNT_OBJ ((reg_dispcnt >> 0xC) & 1)
 
-uint16_t frame[160][240] = {0};
+uint16_t frame[160][240];
 
-uint8_t vram[0x18000] = {0};
-uint8_t oam[0x400] = {0};
-uint8_t pallete_ram[0x400] = {0};
+uint8_t vram[0x18000];
+uint8_t oam[0x400];
+uint8_t pallete_ram[0x400];
 
 uint16_t reg_dispcnt;
 uint16_t reg_dispstat;
@@ -66,7 +66,7 @@ uint16_t reg_bldcnt;
 uint16_t reg_bldalpha;
 uint16_t reg_bldy;
 
-uint8_t reg_vcount; // LCY
+uint8_t reg_vcount = 0; // LCY
 
 // reset at the beginning of each scanline
 size_t cycles = 0;
@@ -90,13 +90,6 @@ void render_scanline(void) {
 
         // bitmap
         case 3:
-        case 4:
-        case 5:
-            if (DCNT_MODE == 5) {
-                fprintf(stderr, "bitmap mode 5 not implemented yet\n");
-                exit(1);
-            }
-
             if (DCNT_BG2) {
                 int bpp = (DCNT_MODE == 4 ? 8 : 16) / 8;
 
@@ -105,6 +98,19 @@ void render_scanline(void) {
                 }
             }
             break;
+        case 4:
+            if (DCNT_BG2) {
+                int bpp = (DCNT_MODE == 4 ? 8 : 16) / 8;
+
+                for (int i = 0; i < 240; i++) {
+                    uint16_t color = *(uint16_t *)(pallete_ram + *(uint8_t *)(vram + (reg_vcount * (240 * bpp)) + (i * bpp)));
+                    frame[reg_vcount][i] = color;
+                }
+            }
+            break;
+        case 5:
+            fprintf(stderr, "bitmap mode 5 not implemented yet\n");
+            exit(1);
         default:
             fprintf(stderr, "video mode [%d]: unexpected!\n", DCNT_MODE);
             exit(1);
@@ -119,17 +125,29 @@ void tick_ppu(void) {
     cycles += 1;
 
     // vblank
-    if (reg_vcount > 160 && (cycles % 1232 == 0)) {
-        reg_vcount += 1;
-        if (reg_vcount == 228) reg_vcount = 0;
+    if (reg_vcount >= 160) {
+        reg_dispstat |= 0x0001;
+
+        if (cycles % 1232 == 0) {
+            reg_vcount += 1;
+            if (reg_vcount == 228) {
+                // NOTE: may be bad?
+                reg_dispstat &= 0xFFFE;
+                reg_vcount = 0;
+                cycles = 0;
+            };
+        }
         return;
     }
+
+    // vdraw
+    if (cycles <= 1006) reg_dispstat = reg_dispstat & 0xFFFE;
 
     // from "research" seems like rendering 32 cycles into H-draw creates best results for scanline PPU
     if (cycles == 32) render_scanline();
 
     // hblank
-    if (cycles == 1006);
+    if (cycles > 1006) {};
 
     // end of scanline
     if (cycles == 1232) {
@@ -137,6 +155,51 @@ void tick_ppu(void) {
         reg_vcount += 1;
     }
 };
+
+uint32_t ppu_read_register(uint32_t addr) {
+    switch (addr) {
+    case 0x04000000: return reg_dispcnt;
+    case 0x04000004: return reg_dispstat;
+    case 0x04000006: return reg_vcount;
+    case 0x04000008: return reg_bg0cnt;
+    case 0x0400000A: return reg_bg1cnt;
+    case 0x0400000C: return reg_bg2cnt;
+    case 0x0400000E: return reg_bg3cnt;
+    case 0x04000010: return reg_bg0hofs;
+    case 0x04000012: return reg_bg0vofs;
+    case 0x04000014: return reg_bg1hofs;
+    case 0x04000016: return reg_bg1vofs;
+    case 0x04000018: return reg_bg2hofs;
+    case 0x0400001A: return reg_bg2vofs;
+    case 0x0400001C: return reg_bg3hofs;
+    case 0x0400001E: return reg_bg3vofs;
+    case 0x04000020: return reg_bg2pa;
+    case 0x04000030: return reg_bg3pa;
+    case 0x04000022: return reg_bg2pb;
+    case 0x04000032: return reg_bg3pb;
+    case 0x04000024: return reg_bg2pc;
+    case 0x04000034: return reg_bg3pc;
+    case 0x04000026: return reg_bg2pd;
+    case 0x04000036: return reg_bg3pd;
+    case 0x04000028: return reg_bg2x;
+    case 0x04000038: return reg_bg3x;
+    case 0x0400002C: return reg_bg2y;
+    case 0x0400003C: return reg_bg3y;
+    case 0x04000040: return reg_win0h;
+    case 0x04000042: return reg_win1h;
+    case 0x04000044: return reg_win0v;
+    case 0x04000046: return reg_win1v;
+    case 0x04000048: return reg_winin;
+    case 0x0400004A: return reg_winout;
+    case 0x0400004C: return reg_mosaic;
+    case 0x04000050: return reg_bldcnt;
+    case 0x04000052: return reg_bldalpha;
+    case 0x04000054: return reg_bldy;
+    default:
+        fprintf(stderr, "[read] unmapped ppu register: 0x%08X\n", addr);
+        exit(1);
+    }
+}
 
 void ppu_set_register(uint32_t addr, uint32_t val) {
     switch (addr) {
@@ -249,7 +312,7 @@ void ppu_set_register(uint32_t addr, uint32_t val) {
         reg_bldy = (uint16_t)val;
         break;
     default:
-        fprintf(stderr, "unmapped ppu register: 0x%08X\n", addr);
+        fprintf(stderr, "[write] unmapped ppu register: 0x%08X\n", addr);
         exit(1);
     }
 }

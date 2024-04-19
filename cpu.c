@@ -44,45 +44,45 @@ typedef enum {
 } Mode;
 
 typedef struct {
-    int32_t r0;
-    int32_t r1;
-    int32_t r2;
-    int32_t r3;
-    int32_t r4;
-    int32_t r5;
-    int32_t r6;
-    int32_t r7;
-    int32_t r8;
-    int32_t r9;
-    int32_t r10;
-    int32_t r11;
-    int32_t r12;
+    uint32_t r0;
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    uint32_t r4;
+    uint32_t r5;
+    uint32_t r6;
+    uint32_t r7;
+    uint32_t r8;
+    uint32_t r9;
+    uint32_t r10;
+    uint32_t r11;
+    uint32_t r12;
 
-    int32_t r13;  // SP (Stack pointer)
-    int32_t r14;  // LR (Link register)
-    int32_t r15;  // PC (Program counter)
-    int32_t r8_fiq;
-    int32_t r9_fiq;
-    int32_t r10_fiq;
-    int32_t r11_fiq;
-    int32_t r12_fiq;
-    int32_t r13_fiq;
-    int32_t r14_fiq;
-    int32_t r13_svc;
-    int32_t r14_svc;
-    int32_t r13_abt;
-    int32_t r14_abt;
-    int32_t r13_irq;
-    int32_t r14_irq;
-    int32_t r13_und;
-    int32_t r14_und;
+    uint32_t r13;  // SP (Stack pointer)
+    uint32_t r14;  // LR (Link register)
+    uint32_t r15;  // PC (Program counter)
+    uint32_t r8_fiq;
+    uint32_t r9_fiq;
+    uint32_t r10_fiq;
+    uint32_t r11_fiq;
+    uint32_t r12_fiq;
+    uint32_t r13_fiq;
+    uint32_t r14_fiq;
+    uint32_t r13_svc;
+    uint32_t r14_svc;
+    uint32_t r13_abt;
+    uint32_t r14_abt;
+    uint32_t r13_irq;
+    uint32_t r14_irq;
+    uint32_t r13_und;
+    uint32_t r14_und;
 
-    int32_t cspr;
-    int32_t spsr_fiq;
-    int32_t spsr_svc;
-    int32_t spsr_abt;
-    int32_t spsr_irq;
-    int32_t spsr_und;
+    uint32_t cspr;
+    uint32_t spsr_fiq;
+    uint32_t spsr_svc;
+    uint32_t spsr_abt;
+    uint32_t spsr_irq;
+    uint32_t spsr_und;
 } RegisterSet;
 
 uint32_t pipeline = 0;
@@ -263,6 +263,7 @@ static inline void set_register(uint8_t r, int32_t v) {
             registers.r13_und = v;
             break;
         }
+        break;
     case 0xE:
         switch (PROCESSOR_MODE) {
         case User:
@@ -285,6 +286,7 @@ static inline void set_register(uint8_t r, int32_t v) {
             registers.r14_und = v;
             break;
         }
+        break;
     case 0xF:
         registers.r15 = v;
         break;
@@ -387,15 +389,18 @@ static inline int execute(uint32_t instr, InstrType type) {
         switch (type) {
         case Branch: {
             bit with_link = (instr >> 24) & 1;
+            
             if (with_link & !THUMB_ACTIVATED) {
-                fprintf(stderr, "branch not implemented\n");
-                exit(1);
+                int32_t offset = (instr & 0xFFFFFF) << 8;
+                registers.r14 = registers.r15 - 4;
+                registers.r15 += (offset >> 8) * 4;
+                DEBUG_PRINT(("BL%s #0x%X\n", cond_to_cstr(instr), registers.r15))
             } else {
                 int32_t offset = (instr & 0xFFFFFF) << 8;
                 registers.r15 += (offset >> 8) * 4;
+                DEBUG_PRINT(("B%s #0x%X\n", cond_to_cstr(instr), registers.r15))
             }
             flush_pipeline = true;
-            DEBUG_PRINT(("B%s #0x%X\n", cond_to_cstr(instr), registers.r15))
             break;
         }
         case BlockDataTransfer: {
@@ -403,31 +408,83 @@ static inline int execute(uint32_t instr, InstrType type) {
             bit u = (instr >> 23) & 1;
             bit s = (instr >> 22) & 1;
             bit w = (instr >> 21) & 1;
-            bit l = (instr >> 21) & 1;
+            bit l = (instr >> 20) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint16_t reg_list = instr & 0xFFFF;
 
-            if (l) {
-                
-            } else {
-
+            if (s) {
+                fprintf(stderr, "FUCK THE S BIT NEEDS TO BE HANDLED\n");
+                exit(1);
             }
 
-            DEBUG_PRINT(("%s%s%s %s, <reglist>$%04X\n", l ? "LDM" : "STM", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn), reg_list))
-            exit(1);
+            if (l) {
+                uint32_t base = get_register_val(rn);
+                int amod = (p << 1) | u;
+
+                DEBUG_PRINT(("LDM%s%s %s, { ", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn)))
+
+                switch (amod) {
+                case 1: // IB
+                case 3: // IA
+                    for (int reg = 15; reg >= 0; reg--) {
+                        bool should_transfer = (reg_list >> reg) & 1;
+
+                        if (should_transfer) {
+                            uint32_t addr = amod == 1 ? base : base + 4;
+
+                            write_word(addr, get_register_val(reg));
+                            if (w) set_register(rn, base + 4);
+                            DEBUG_PRINT(("%s ", register_to_cstr(reg), reg))
+                        }
+                    }
+                    DEBUG_PRINT(("}\n"))
+                    break;
+                case 0: // DA
+                case 2: // DB
+                    break;
+                }
+            } else {
+                uint32_t base = get_register_val(rn);
+                int amod = (p << 1) | u;
+
+                DEBUG_PRINT(("STM%s%s %s, { ", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn)))
+
+                switch (amod) {
+                case 1: // IB
+                case 3: // IA
+                    break;
+                case 0: // DA
+                case 2: // DB
+                    for (int reg = 15; reg >= 0; reg--) {
+                        bool should_transfer = (reg_list >> reg) & 1;
+
+                        if (should_transfer) {
+                            // DA (amod == 0) will decrement rn after the write
+                            uint32_t addr = amod == 0 ? base : base - 4;
+
+                            write_word(addr, get_register_val(reg));
+                            if (w) set_register(rn, base - 4);
+                            DEBUG_PRINT(("%s ", register_to_cstr(reg), reg))
+                        }
+                    }
+                    DEBUG_PRINT(("}\n"))
+                    break;
+                }
+            }
             break;
         }
         case DataProcessing: {
             uint8_t opcode = (instr >> 21) & 0xF;
             bit i = (instr >> 25) & 1;
             bit s = (instr >> 20) & 1;
+            bit barrel_shifter_carry_output = 0;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
             uint32_t operand2;
-
+            
             if (i) {
                 operand2 = ROR(instr & 0xFF, ((instr & 0xF00) >> 8) * 2);
             } else {
@@ -446,6 +503,7 @@ static inline int execute(uint32_t instr, InstrType type) {
 
                 switch (shift_type) {
                 case 0:
+                    barrel_shifter_carry_output = (get_register_val(rm) << (shift_amount - 1)) >> 30;
                     operand2 = shift_amount > 31 ? 0 : get_register_val(rm) << shift_amount;
                     break;
                 case 1:
@@ -489,9 +547,12 @@ static inline int execute(uint32_t instr, InstrType type) {
             case 0x7:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
-            case 0x8:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
+            case 0x8: {
+                int32_t result = get_register_val(rn) & operand2;
+                set_cc(result < 0, result == 0, !i ? CC_UNMOD : barrel_shifter_carry_output, CC_UNMOD);
+                DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2))
+                break;
+            }
             case 0x9:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
@@ -509,6 +570,7 @@ static inline int execute(uint32_t instr, InstrType type) {
                 exit(1);
             case 0xD:
                 set_register(rd, operand2);
+                if (rd == 0xF) flush_pipeline = true;
                 if (s) {
                     fprintf(stderr, "TODO set flags for MOV ALU\n");
                     exit(1);
@@ -591,23 +653,110 @@ static inline int execute(uint32_t instr, InstrType type) {
                     DEBUG_PRINT((", %s]", register_to_cstr(instr & 0xF)))
                 }
 
-                if (w) {
-                    DEBUG_PRINT(("\n"));
+                if ((p && w) || !p) {
+                    DEBUG_PRINT(("!\n"));
                 } else {
-                    DEBUG_PRINT(("!\n"))
+                    DEBUG_PRINT(("\n"))
                 }
             } else {
                 DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
                 if (i) {
                     DEBUG_PRINT(("#0x%X\n", !u ? -offset : offset))
                 } else {
-                    DEBUG_PRINT((", %s\n", register_to_cstr(instr & 0xF)))
+                    DEBUG_PRINT(("%s\n", register_to_cstr(instr & 0xF)))
                 }
             }
             break;
         }
+        case SingleDataTransfer: {
+            bit i = (instr >> 25) & 1;
+            bit p = (instr >> 24) & 1;
+            bit u = (instr >> 23) & 1;
+            bit b = (instr >> 22) & 1;
+            bit w = (instr >> 21) & 1;
+            bit l = (instr >> 20) & 1;
+
+            uint8_t rn = (instr >> 16) & 0xF;
+            uint8_t rd = (instr >> 12) & 0xF;
+
+            int32_t offset = i ? -1 : instr & 0xFFF;
+            if (!u) offset = -offset;
+
+            uint32_t address = get_register_val(rn) + offset;
+
+            if (i) {
+                fprintf(stderr, "i bit set in singledatatransfer unhandled\n");
+                exit(1);
+            }
+
+            if (l) { // LDR (load from memory)
+                if (p) { // pre (add offset before transfer)
+                    set_register(rd, b ? read_word(address) & 0xFF : read_word(address));
+                } else { // post (add offset after transfer)
+                    if (w) {
+                        fprintf(stderr, "t bit set FUCK");
+                        exit(1);
+                    }
+                    fprintf(stderr, "p bit not set single data transfer");
+                    exit(1);
+                }
+                DEBUG_PRINT(("LDR%s%s ", cond_to_cstr(instr), b ? "B" : " "))
+            } else { // STR (store to memory)
+                if (p) { 
+                    if (b) { // transfer byte
+                        write_word(address, get_register_val(rd) & 0xFF);
+                    } else { // transfer word
+                        write_word(address, get_register_val(rd));
+                    }
+                } else {
+                    if (w) { // means
+                        fprintf(stderr, "t bit set FUCK");
+                        exit(1);
+                    }
+
+                    if (b) {
+                        write_word(address - offset, get_register_val(rd) & 0xFF);
+                    } else {
+                        write_word(address - offset, get_register_val(rd));
+                    }
+                }
+                DEBUG_PRINT(("STR%s ", cond_to_cstr(instr)))
+            }
+
+            if ((p && w) || !p) set_register(rn, address);
+
+            // TODO: FIX THIS BULLSHIT!
+
+            DEBUG_PRINT(("%s, \n", register_to_cstr(rd)))
+            // if (p) {
+            //     if (i) {
+            //         DEBUG_PRINT(("[%s", register_to_cstr(rn)))
+            //         if (offset) {
+            //             DEBUG_PRINT((", #0x%X]", !u ? -offset : offset))
+            //         } else {
+            //             DEBUG_PRINT(("]"))
+            //         }
+            //     } else {
+            //         DEBUG_PRINT((", %s]", register_to_cstr(instr & 0xF)))
+            //     }
+
+            //     if ((p && t_or_w) || !p) {
+            //         DEBUG_PRINT(("!\n"));
+            //     } else {
+            //         DEBUG_PRINT(("\n"))
+            //     }
+            // } else {
+            //     DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
+            //     if (i) {
+            //         DEBUG_PRINT(("#0x%X\n", !u ? -offset : offset))
+            //     } else {
+            //         DEBUG_PRINT(("%s\n", register_to_cstr(instr & 0xF)))
+            //     }
+            // }
+            break;
+        }
         default:
-            fprintf(stderr, "decoded instruction not handled yet!\n");
+            fprintf(stderr, "decoded instruction not handled yet! %d\n", type);
             exit(1);
         }
 
@@ -642,7 +791,7 @@ void init_GBA(char *rom_file, char *bios_file) {
     registers.cspr |= System;
 }
 
-uint16_t* render_frame(void) {
+uint16_t* compute_frame(void) {
     int total_cycles = 0;
     while (total_cycles < 280896) {
         int cycles = tick_cpu();

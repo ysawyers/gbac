@@ -10,6 +10,6 @@
 #define CPU_H
 
 void init_GBA(char *rom_file, char *bios_file);
-uint16_t* render_frame(void);
+uint16_t* compute_frame(void);
 
 #endif

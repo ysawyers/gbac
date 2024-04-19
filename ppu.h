@@ -11,6 +11,7 @@ extern uint8_t pallete_ram[0x400];
 
 void tick_ppu(void);
 
+uint32_t ppu_read_register(uint32_t addr);
 void ppu_set_register(uint32_t addr, uint32_t val);
 
 #endif
