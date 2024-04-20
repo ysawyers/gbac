@@ -74,7 +74,7 @@ size_t cycles = 0;
 void render_scanline(void) {
     // forced vblank displays all white
     if (DCNT_BLANK) {
-        for (int i = 0; i < 240; i++) frame[reg_vcount][i] = 0;
+        for (int i = 0; i < 240; i++) frame[reg_vcount][i] = 0xFFFF;
         return;
     }
 
@@ -89,22 +89,18 @@ void render_scanline(void) {
             exit(1);
 
         // bitmap
-        case 3:
+        case 3: // 240x160 2bpp directly in vram
             if (DCNT_BG2) {
-                int bpp = (DCNT_MODE == 4 ? 8 : 16) / 8;
-
                 for (int i = 0; i < 240; i++) {
-                    frame[reg_vcount][i] = *(uint16_t *)(vram + (reg_vcount * (240 * bpp)) + (i * bpp));
+                    frame[reg_vcount][i] = *(uint16_t *)(vram + (reg_vcount * (240 * 2)) + (i * 2));
                 }
             }
             break;
-        case 4:
+        case 4: // 240x160 1bpp from vram as pallete index
             if (DCNT_BG2) {
-                int bpp = (DCNT_MODE == 4 ? 8 : 16) / 8;
-
                 for (int i = 0; i < 240; i++) {
-                    uint16_t color = *(uint16_t *)(pallete_ram + *(uint8_t *)(vram + (reg_vcount * (240 * bpp)) + (i * bpp)));
-                    frame[reg_vcount][i] = color;
+                    uint8_t pallete_idx = *(uint8_t *)(vram + (reg_vcount * 240) + i);
+                    frame[reg_vcount][i] = *(uint16_t *)(pallete_ram + pallete_idx);
                 }
             }
             break;

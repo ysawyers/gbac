@@ -380,27 +380,21 @@ static inline InstrType decode_arm(uint32_t instr) {
 }
 
 static inline int execute(uint32_t instr, InstrType type) {
-    bool flush_pipeline = false;
-    int cycles = 0;
-
     DEBUG_PRINT(("[%s] (%08X) %08X ", THUMB_ACTIVATED ? "THUMB" : "ARM", registers.r15 - 8, instr))
+
+    int32_t original_pc = registers.r15;
+    int cycles = 0;
 
     if (cond(instr)) {
         switch (type) {
         case Branch: {
             bit with_link = (instr >> 24) & 1;
+            int32_t offset = (instr & 0xFFFFFF) << 8;
             
-            if (with_link & !THUMB_ACTIVATED) {
-                int32_t offset = (instr & 0xFFFFFF) << 8;
-                registers.r14 = registers.r15 - 4;
-                registers.r15 += (offset >> 8) * 4;
-                DEBUG_PRINT(("BL%s #0x%X\n", cond_to_cstr(instr), registers.r15))
-            } else {
-                int32_t offset = (instr & 0xFFFFFF) << 8;
-                registers.r15 += (offset >> 8) * 4;
-                DEBUG_PRINT(("B%s #0x%X\n", cond_to_cstr(instr), registers.r15))
-            }
-            flush_pipeline = true;
+            if (with_link & !THUMB_ACTIVATED) registers.r14 = registers.r15 - 4;
+            registers.r15 += (offset >> 8) * 4;
+
+            DEBUG_PRINT(("B%s%s #0x%X\n", with_link ? "L" : "", cond_to_cstr(instr), registers.r15))
             break;
         }
         case BlockDataTransfer: {
@@ -418,22 +412,20 @@ static inline int execute(uint32_t instr, InstrType type) {
                 exit(1);
             }
 
-            if (l) {
-                uint32_t base = get_register_val(rn);
-                int amod = (p << 1) | u;
-
+            if (l) { // LDM (load from memory)
                 DEBUG_PRINT(("LDM%s%s %s, { ", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn)))
 
+                int amod = (p << 1) | u;
                 switch (amod) {
-                case 1: // IB
-                case 3: // IA
-                    for (int reg = 15; reg >= 0; reg--) {
+                case 1: // IA
+                case 3: // IB
+                    for (int reg = 0; reg < 16; reg++) {
                         bool should_transfer = (reg_list >> reg) & 1;
 
                         if (should_transfer) {
+                            uint32_t base = get_register_val(rn);
                             uint32_t addr = amod == 1 ? base : base + 4;
-
-                            write_word(addr, get_register_val(reg));
+                            set_register(reg, read_word(addr));
                             if (w) set_register(rn, base + 4);
                             DEBUG_PRINT(("%s ", register_to_cstr(reg), reg))
                         }
@@ -444,15 +436,13 @@ static inline int execute(uint32_t instr, InstrType type) {
                 case 2: // DB
                     break;
                 }
-            } else {
-                uint32_t base = get_register_val(rn);
-                int amod = (p << 1) | u;
-
+            } else { // STM (store to memory)
                 DEBUG_PRINT(("STM%s%s %s, { ", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn)))
 
+                int amod = (p << 1) | u;
                 switch (amod) {
-                case 1: // IB
-                case 3: // IA
+                case 1: // IA
+                case 3: // IB
                     break;
                 case 0: // DA
                 case 2: // DB
@@ -460,9 +450,8 @@ static inline int execute(uint32_t instr, InstrType type) {
                         bool should_transfer = (reg_list >> reg) & 1;
 
                         if (should_transfer) {
-                            // DA (amod == 0) will decrement rn after the write
+                            uint32_t base = get_register_val(rn);
                             uint32_t addr = amod == 0 ? base : base - 4;
-
                             write_word(addr, get_register_val(reg));
                             if (w) set_register(rn, base - 4);
                             DEBUG_PRINT(("%s ", register_to_cstr(reg), reg))
@@ -475,16 +464,17 @@ static inline int execute(uint32_t instr, InstrType type) {
             break;
         }
         case DataProcessing: {
+            bit barrel_shifter_carry_output = 0; // stores last bit shifted out of barrel shifter
+
             uint8_t opcode = (instr >> 21) & 0xF;
             bit i = (instr >> 25) & 1;
             bit s = (instr >> 20) & 1;
-            bit barrel_shifter_carry_output = 0;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
             uint32_t operand2;
-            
+
             if (i) {
                 operand2 = ROR(instr & 0xFF, ((instr & 0xF00) >> 8) * 2);
             } else {
@@ -495,9 +485,17 @@ static inline int execute(uint32_t instr, InstrType type) {
                 uint8_t shift_amount;
 
                 if (r) {
+                    if (rm == 0xF || rn == 0xF) {
+                        printf("rm = r15 or rn = r15 edge case ALU pc + 12\n");
+                        exit(1);
+                    }
                     DEBUG_PRINT(("i = 0 r = 1 branch case\n"))
                     exit(1);
                 } else {
+                    if (rm == 0xF || rn == 0xF) {
+                        printf("rm = r15 or rn = r15 edge case ALU pc + 8\n");
+                        exit(1);
+                    }
                     shift_amount = (instr >> 7) & 0x1F;
                 }
 
@@ -553,9 +551,12 @@ static inline int execute(uint32_t instr, InstrType type) {
                 DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2))
                 break;
             }
-            case 0x9:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
+            case 0x9: {
+                int32_t result = get_register_val(rn) ^ operand2;
+                set_cc(result < 0, result == 0, !i ? CC_UNMOD : barrel_shifter_carry_output, CC_UNMOD);
+                DEBUG_PRINT(("TEQ%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2))
+                break;
+            }
             case 0xA: {
                 int32_t result = get_register_val(rn) - operand2;
                 set_cc(result < 0, result == 0, result > 0, operand2 < 0 && get_register_val(rn) < 0 && result > 0);
@@ -566,15 +567,16 @@ static inline int execute(uint32_t instr, InstrType type) {
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
             case 0xC:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
+                set_register(rd, get_register_val(rn) | operand2);                
+                if (s) {
+                    fprintf(stderr, "SET FLAGS FOR OxC ALU THING\n");
+                    exit(1);
+                }
+                DEBUG_PRINT(("ORR%s %s, %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rd), register_to_cstr(rn), operand2))
+                break;
             case 0xD:
                 set_register(rd, operand2);
-                if (rd == 0xF) flush_pipeline = true;
-                if (s) {
-                    fprintf(stderr, "TODO set flags for MOV ALU\n");
-                    exit(1);
-                };
+                if (s) set_cc(operand2 < 0, operand2 == 0, !i ? CC_UNMOD : barrel_shifter_carry_output, CC_UNMOD);
                 DEBUG_PRINT(("MOV%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rd), operand2))
                 break;
             case 0xE:
@@ -672,7 +674,7 @@ static inline int execute(uint32_t instr, InstrType type) {
             bit i = (instr >> 25) & 1;
             bit p = (instr >> 24) & 1;
             bit u = (instr >> 23) & 1;
-            bit b = (instr >> 22) & 1;
+            bit b = (instr >> 22) & 1; // byte transfers if set otherwise one word
             bit w = (instr >> 21) & 1;
             bit l = (instr >> 20) & 1;
 
@@ -703,22 +705,13 @@ static inline int execute(uint32_t instr, InstrType type) {
                 DEBUG_PRINT(("LDR%s%s ", cond_to_cstr(instr), b ? "B" : " "))
             } else { // STR (store to memory)
                 if (p) { 
-                    if (b) { // transfer byte
-                        write_word(address, get_register_val(rd) & 0xFF);
-                    } else { // transfer word
-                        write_word(address, get_register_val(rd));
-                    }
+                    write_word(address, b ? get_register_val(rd) & 0xFF : get_register_val(rd));
                 } else {
-                    if (w) { // means
+                    if (w) {
                         fprintf(stderr, "t bit set FUCK");
                         exit(1);
                     }
-
-                    if (b) {
-                        write_word(address - offset, get_register_val(rd) & 0xFF);
-                    } else {
-                        write_word(address - offset, get_register_val(rd));
-                    }
+                    write_word(address - offset, b ? get_register_val(rd) & 0xFF : get_register_val(rd));
                 }
                 DEBUG_PRINT(("STR%s ", cond_to_cstr(instr)))
             }
@@ -760,7 +753,8 @@ static inline int execute(uint32_t instr, InstrType type) {
             exit(1);
         }
 
-        if (flush_pipeline) pipeline = 0;
+        // will force pipeline flush if r15 is modified in execute stage
+        if (registers.r15 != original_pc) pipeline = 0;
     } else {
         DEBUG_PRINT(("\n"));
     }

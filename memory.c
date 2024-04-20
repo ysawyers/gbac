@@ -44,6 +44,12 @@ uint32_t read_word(uint32_t addr) {
     if (addr < 0x4000)
         return *(uint32_t *)(bios + addr);
 
+    if (addr >= 0x02000000 && addr <= 0x02FFFFFF)
+        return *(uint32_t *)(external_wram + ((addr - 0x02000000) % 0x40000));
+
+    if (addr >= 0x03000000 && addr <= 0x03FFFFFF)
+        return *(uint32_t *)(internal_wram + ((addr - 0x03000000) % 0x8000));
+     
     if (addr >= 0x04000000 && addr <= 0x04000054)
         return ppu_read_register(addr);
 
@@ -94,6 +100,11 @@ void write_half_word(uint32_t addr, uint16_t val) {
 void write_word(uint32_t addr, uint32_t val) {
     if (addr >= 0x02000000 && addr <= 0x02FFFFFF) {
         *(uint32_t *)(external_wram + ((addr - 0x02000000) % 0x40000)) = val;
+        return;
+    }
+
+    if (addr >= 0x03000000 && addr <= 0x03FFFFFF) {
+        *(uint32_t *)(internal_wram + ((addr - 0x03000000) % 0x8000)) = val;
         return;
     }
 
