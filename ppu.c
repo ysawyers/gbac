@@ -111,9 +111,10 @@ void render_scanline(void) {
             fprintf(stderr, "video mode [%d]: unexpected!\n", DCNT_MODE);
             exit(1);
         }
-    } else { // render nothing, draw backdrop
-        fprintf(stderr, "render backdrop\n");
-        exit(1);
+    } else { // all render bits disabled, draw backdrop (first entry in pallete RAM)
+        for (int i = 0; i < 240; i++) {
+            frame[reg_vcount][i] = *(uint16_t *)pallete_ram;
+        }
     }
 }
 

@@ -11,6 +11,8 @@
     "string_view": "c",
     "unordered_map": "c",
     "vector": "c",
-    "bitset": "c"
+    "bitset": "c",
+    "__locale": "c",
+    "memory.h": "c"
   }
 }

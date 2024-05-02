@@ -9,17 +9,27 @@
 #define CC_SET   1
 #define CC_UNMOD 2
 
-#define THUMB_ACTIVATED (registers.cspr >> 5 & 1)
-#define PROCESSOR_MODE  (registers.cspr & 0x1F)
+#define THUMB_ACTIVATED             (cpu->registers.cpsr >> 5 & 1)
+#define PROCESSOR_MODE              (cpu->registers.cpsr & 0x1F)
 
-#define SIGN_FLAG     (registers.cspr >> 31 & 1)
-#define ZERO_FLAG     (registers.cspr >> 30 & 1)
-#define CARRY_FLAG    (registers.cspr >> 29 & 1)
-#define OVERFLOW_FLAG (registers.cspr >> 28 & 1)
+#define SET_PROCESSOR_MODE(mode) cpu->registers.cpsr &= ~0x1F;\
+                                 cpu->registers.cpsr |= mode;
 
-#define ROR(n, shift) ((n) >> (shift) | (n) << (32 - (shift)))
+typedef bool Bit;
+typedef uint32_t Word;
 
-typedef bool bit;
+int poop = 1;
+
+static inline Word get_reg(uint8_t reg_id);
+static inline Word get_psr_reg(void);
+static inline int tick_cpu(void);
+
+typedef enum {
+    SHIFT_TYPE_LSL,
+    SHIFT_TYPE_LSR,
+    SHIFT_TYPE_ASR,
+    SHIFT_TYPE_ROR
+} ShiftType;
 
 typedef enum {
     Branch,
@@ -28,9 +38,35 @@ typedef enum {
     HalfwordDataTransfer,
     SingleDataTransfer,
     DataProcessing,
-    MUL,
-    MULL,
+    Multiply,
     SWP,
+    SoftwareInterrupt,
+    SingleDataSwap,
+    MSR,
+    MRS,
+
+    THUMB_1,
+    THUMB_2,
+    THUMB_3,
+    THUMB_4,
+    THUMB_5,
+    THUMB_6,
+    THUMB_7,
+    THUMB_8,
+    THUMB_9,
+    THUMB_10,
+    THUMB_11,
+    THUMB_12,
+    THUMB_13,
+    THUMB_14,
+    THUMB_15,
+    THUMB_16,
+    THUMB_17,
+    THUMB_18,
+    THUMB_19,
+
+    ARM_BAD_INSTR,
+    THUMB_BAD_INSTR,
 } InstrType;
 
 typedef enum {
@@ -43,54 +79,64 @@ typedef enum {
     System      = 0x1F
 } Mode;
 
+typedef enum {
+    N, Z, C, V
+} Flag;
+
 typedef struct {
-    uint32_t r0;
-    uint32_t r1;
-    uint32_t r2;
-    uint32_t r3;
-    uint32_t r4;
-    uint32_t r5;
-    uint32_t r6;
-    uint32_t r7;
-    uint32_t r8;
-    uint32_t r9;
-    uint32_t r10;
-    uint32_t r11;
-    uint32_t r12;
+    Word r0;
+    Word r1;
+    Word r2;
+    Word r3;
+    Word r4;
+    Word r5;
+    Word r6;
+    Word r7;
+    Word r8;
+    Word r9;
+    Word r10;
+    Word r11;
+    Word r12;
 
-    uint32_t r13;  // SP (Stack pointer)
-    uint32_t r14;  // LR (Link register)
-    uint32_t r15;  // PC (Program counter)
-    uint32_t r8_fiq;
-    uint32_t r9_fiq;
-    uint32_t r10_fiq;
-    uint32_t r11_fiq;
-    uint32_t r12_fiq;
-    uint32_t r13_fiq;
-    uint32_t r14_fiq;
-    uint32_t r13_svc;
-    uint32_t r14_svc;
-    uint32_t r13_abt;
-    uint32_t r14_abt;
-    uint32_t r13_irq;
-    uint32_t r14_irq;
-    uint32_t r13_und;
-    uint32_t r14_und;
+    Word r13;  // SP (Stack pointer)
+    Word r14;  // LR (Link register)
+    Word r15;  // PC (Program counter)
+    Word r8_fiq;
+    Word r9_fiq;
+    Word r10_fiq;
+    Word r11_fiq;
+    Word r12_fiq;
+    Word r13_fiq;
+    Word r14_fiq;
+    Word r13_svc;
+    Word r14_svc;
+    Word r13_abt;
+    Word r14_abt;
+    Word r13_irq;
+    Word r14_irq;
+    Word r13_und;
+    Word r14_und;
 
-    uint32_t cspr;
-    uint32_t spsr_fiq;
-    uint32_t spsr_svc;
-    uint32_t spsr_abt;
-    uint32_t spsr_irq;
-    uint32_t spsr_und;
+    Word cpsr;
+    Word spsr_fiq;
+    Word spsr_svc;
+    Word spsr_abt;
+    Word spsr_irq;
+    Word spsr_und;
 } RegisterSet;
 
-uint32_t pipeline = 0;
+typedef struct {
+    RegisterSet registers;
+    Word pipeline;
+    Bit shifter_carry;
 
-RegisterSet registers = {0};
+    Memory *mem;
+} CPU;
 
-static inline char* cond_to_cstr(uint32_t instr) {
-    switch (instr >> 28) {
+CPU *cpu;
+
+char* cond_to_cstr(uint8_t opcode) {
+    switch (opcode) {
     case 0x0: return "EQ";
     case 0x1: return "NE";
     case 0x2: return "CS";
@@ -107,160 +153,228 @@ static inline char* cond_to_cstr(uint32_t instr) {
     case 0xD: return "LE";
     case 0xE: return "";
     }
+    return "";
 }
 
-static inline char* amod_to_cstr(bit p, bit u) {
+char* amod_to_cstr(Bit p, Bit u) {
     switch ((p << 1) | u) {
-    case 0: return "DA";
-    case 1: return "IA";
-    case 2: return "DB";
-    case 3: return "IB";
+    case 0x0: return "DA";
+    case 0x1: return "IA";
+    case 0x2: return "DB";
+    case 0x3: return "IB";
+    }
+    return "";
+}
+
+char* register_to_cstr(uint8_t reg_id) {
+    switch (reg_id) {
+    case 0x0: return "r0";
+    case 0x1: return "r1";
+    case 0x2: return "r2";
+    case 0x3: return "r3";
+    case 0x4: return "r4";
+    case 0x5: return "r5";
+    case 0x6: return "r6";
+    case 0x7: return "r7";
+    case 0x8: return "r8";
+    case 0x9: return "r9";
+    case 0xA: return "r10";
+    case 0xB: return "r11";
+    case 0xC: return "ip";
+    case 0xD: return "sp";
+    case 0xE: return "lr";
+    case 0xF: return "pc";
+    }
+    return "";
+}
+
+void print_dump(void) {
+    printf("\n\n==== DUMP ====\n");
+    for (int i = 0; i < 16; i++) {
+        printf("r%d: %08X\n", i, get_reg(i));
+    }
+    printf("cpsr: %08X\n", cpu->registers.cpsr);
+    printf("current psr: %08X\n", get_psr_reg());
+    if (cpu->pipeline) printf("pipeline (next instruction): %08X\n", cpu->pipeline);
+    printf("\n");
+}
+
+static inline Word get_psr_reg(void) {
+    switch (PROCESSOR_MODE) {
+    case User:
+    case System: return cpu->registers.cpsr;
+    case FIQ: return cpu->registers.spsr_fiq;
+    case IRQ: return cpu->registers.spsr_irq;
+    case Supervisor: return cpu->registers.spsr_svc;
+    case Abort: return cpu->registers.spsr_abt;
+    case Undefined: return cpu->registers.spsr_und;
     }
 }
 
-static inline char* register_to_cstr(uint8_t r) {
-    switch (r) {
-    case 0: return "r0";
-    case 1: return "r1";
-    case 2: return "r2";
-    case 3: return "r3";
-    case 4: return "r4";
-    case 5: return "r5";
-    case 6: return "r6";
-    case 7: return "r7";
-    case 8: return "r8";
-    case 9: return "r9";
-    case 10: return "r10";
-    case 11: return "r11";
-    case 12: return "r12";
-    case 13: return "r13";
-    case 14: return "r14";
-    case 15: return "r15";
+static inline void set_psr_reg(Word val) {
+    switch (PROCESSOR_MODE) {
+    case User:
+    case System:
+        cpu->registers.cpsr = val;
+        break;
+    case FIQ:
+        cpu->registers.spsr_fiq = val;
+        break;
+    case IRQ:
+        cpu->registers.spsr_irq = val;
+        break;
+    case Supervisor:
+        cpu->registers.spsr_svc = val;
+        break;
+    case Abort:
+        cpu->registers.spsr_abt = val;
+        break;
+    case Undefined:
+        cpu->registers.spsr_und = val;
+        break;
     }
 }
 
-static inline bit cond(uint32_t instr) {
-    switch (instr >> 28) {
-    case 0x0: return ZERO_FLAG;
-    case 0x1: return !ZERO_FLAG;
-    case 0x2: return CARRY_FLAG;
-    case 0x3: return !CARRY_FLAG;
-    case 0x4: return SIGN_FLAG;
-    case 0x5: return !SIGN_FLAG;
-    case 0x6: return OVERFLOW_FLAG;
-    case 0x7: return !OVERFLOW_FLAG;
-    case 0x8: return CARRY_FLAG & !ZERO_FLAG;
-    case 0x9: return !CARRY_FLAG | ZERO_FLAG;
-    case 0xA: return SIGN_FLAG == OVERFLOW_FLAG;
-    case 0xB: return SIGN_FLAG ^ OVERFLOW_FLAG;
-    case 0xC: return !ZERO_FLAG && (SIGN_FLAG == OVERFLOW_FLAG);
-    case 0xD: return ZERO_FLAG || (SIGN_FLAG ^ OVERFLOW_FLAG);
+static inline Bit get_cc(Flag cc) {
+    switch (cc) {
+    case N: return (get_psr_reg() >> 31) & 1;
+    case Z: return (get_psr_reg() >> 30) & 1;
+    case C: return (get_psr_reg() >> 29) & 1;
+    case V: return (get_psr_reg() >> 28) & 1;
+    }
+}
+
+static inline void set_cc(uint8_t n, int z, int c, int v) {
+    Word curr_psr = get_psr_reg();
+
+    if (n != CC_UNMOD) curr_psr = n ? (1 << 31) | curr_psr : ~(1 << 31) & curr_psr;
+    if (z != CC_UNMOD) curr_psr = z ? (1 << 30) | curr_psr : ~(1 << 30) & curr_psr;
+    if (c != CC_UNMOD) curr_psr = c ? (1 << 29) | curr_psr : ~(1 << 29) & curr_psr;
+    if (v != CC_UNMOD) curr_psr = v ? (1 << 28) | curr_psr : ~(1 << 28) & curr_psr;
+
+    set_psr_reg(curr_psr);
+}
+
+static inline bool eval_cond(uint8_t opcode) {
+    switch (opcode) {
+    case 0x0: return get_cc(Z);
+    case 0x1: return !get_cc(Z);
+    case 0x2: return get_cc(C);
+    case 0x3: return !get_cc(C);
+    case 0x4: return get_cc(N);
+    case 0x5: return !get_cc(N);
+    case 0x6: return get_cc(V);
+    case 0x7: return !get_cc(V);
+    case 0x8: return get_cc(C) & !get_cc(Z);
+    case 0x9: return !get_cc(C) | get_cc(Z);
+    case 0xA: return get_cc(N) == get_cc(V);
+    case 0xB: return get_cc(N) ^ get_cc(V);
+    case 0xC: return !get_cc(Z) && (get_cc(N) == get_cc(V));
+    case 0xD: return get_cc(Z) || (get_cc(N) ^ get_cc(V));
     case 0xE: return true;
     }
 }
 
-static inline int32_t get_register_val(uint8_t r) {
-    switch (r) {
-    case 0x0: return registers.r0;
-    case 0x1: return registers.r1;
-    case 0x2: return registers.r2;
-    case 0x3: return registers.r3;
-    case 0x4: return registers.r4;
-    case 0x5: return registers.r5;
-    case 0x6: return registers.r6;
-    case 0x7: return registers.r7;
-    case 0x8: return registers.r8;
-    case 0x9: return registers.r9;
-    case 0xA: return registers.r10;
-    case 0xB: return registers.r11;
-    case 0xC: return registers.r12;
+static inline Word get_reg(uint8_t reg_id) {
+    switch (reg_id) {
+    case 0x0: return cpu->registers.r0;
+    case 0x1: return cpu->registers.r1;
+    case 0x2: return cpu->registers.r2;
+    case 0x3: return cpu->registers.r3;
+    case 0x4: return cpu->registers.r4;
+    case 0x5: return cpu->registers.r5;
+    case 0x6: return cpu->registers.r6;
+    case 0x7: return cpu->registers.r7;
+    case 0x8: return cpu->registers.r8;
+    case 0x9: return cpu->registers.r9;
+    case 0xA: return cpu->registers.r10;
+    case 0xB: return cpu->registers.r11;
+    case 0xC: return cpu->registers.r12;
     case 0xD:
         switch (PROCESSOR_MODE) {
         case User:
-        case System:
-            return registers.r13;
-        case FIQ: return registers.r13_fiq;
-        case IRQ: return registers.r13_irq;
-        case Supervisor: return registers.r13_svc;
-        case Abort: return registers.r13_abt;
-        case Undefined: return registers.r13_und;
+        case System: return cpu->registers.r13;
+        case FIQ: return cpu->registers.r13_fiq;
+        case IRQ: return cpu->registers.r13_irq;
+        case Supervisor: return cpu->registers.r13_svc;
+        case Abort: return cpu->registers.r13_abt;
+        case Undefined: return cpu->registers.r13_und;
         }
     case 0xE:
         switch (PROCESSOR_MODE) {
         case User:
-        case System:
-            return registers.r14;
-        case FIQ: return registers.r14_fiq;
-        case IRQ: return registers.r14_irq;
-        case Supervisor: return registers.r14_svc;
-        case Abort: return registers.r14_abt;
-        case Undefined: return registers.r14_und;
+        case System: return cpu->registers.r14;
+        case FIQ: return cpu->registers.r14_fiq;
+        case IRQ: return cpu->registers.r14_irq;
+        case Supervisor: return cpu->registers.r14_svc;
+        case Abort: return cpu->registers.r14_abt;
+        case Undefined: return cpu->registers.r14_und;
         }
-    case 0xF: return registers.r15;
+    case 0xF: return cpu->registers.r15;
     }
 }
 
-static inline void set_register(uint8_t r, int32_t v) {
-    switch (r) {
+static inline void set_reg(uint8_t reg_id, Word val) {
+    switch (reg_id) {
     case 0x0:
-        registers.r0 = v;
+        cpu->registers.r0 = val;
         break;
     case 0x1:
-        registers.r1 = v;
+        cpu->registers.r1 = val;
         break;
     case 0x2:
-        registers.r2 = v;
+        cpu->registers.r2 = val;
         break;
     case 0x3:
-        registers.r3 = v;
+        cpu->registers.r3 = val;
         break;
     case 0x4:
-        registers.r4 = v;
+        cpu->registers.r4 = val;
         break;
     case 0x5:
-        registers.r5 = v;
+        cpu->registers.r5 = val;
         break;
     case 0x6:
-        registers.r6 = v;
+        cpu->registers.r6 = val;
         break;
     case 0x7:
-        registers.r7 = v;
+        cpu->registers.r7 = val;
         break;
     case 0x8:
-        registers.r8 = v;
+        cpu->registers.r8 = val;
         break;
     case 0x9:
-        registers.r9 = v;
+        cpu->registers.r9 = val;
         break;
     case 0xA:
-        registers.r10 = v;
+        cpu->registers.r10 = val;
         break;
     case 0xB:
-        registers.r11 = v;
+        cpu->registers.r11 = val;
         break;
     case 0xC:
-        registers.r12 = v;
+        cpu->registers.r12 = val;
         break;
     case 0xD:
         switch (PROCESSOR_MODE) {
         case User:
         case System:
-            registers.r13 = v;
+            cpu->registers.r13 = val;
             break;
         case FIQ:
-            registers.r13_fiq = v;
+            cpu->registers.r13_fiq = val;
             break;
         case IRQ:
-            registers.r13_irq = v;
+            cpu->registers.r13_irq = val;
             break;
         case Supervisor:
-            registers.r13_svc = v;
+            cpu->registers.r13_svc = val;
             break;
         case Abort:
-            registers.r13_abt = v;
+            cpu->registers.r13_abt = val;
             break;
         case Undefined:
-            registers.r13_und = v;
+            cpu->registers.r13_und = val;
             break;
         }
         break;
@@ -268,152 +382,257 @@ static inline void set_register(uint8_t r, int32_t v) {
         switch (PROCESSOR_MODE) {
         case User:
         case System:
-            registers.r14 = v;
+            cpu->registers.r14 = val;
             break;
         case FIQ:
-            registers.r14_fiq = v;
+            cpu->registers.r14_fiq = val;
             break;
         case IRQ:
-            registers.r14_irq = v;
+            cpu->registers.r14_irq = val;
             break;
         case Supervisor:
-            registers.r14_svc = v;
+            cpu->registers.r14_svc = val;
             break;
         case Abort:
-            registers.r14_abt = v;
+            cpu->registers.r14_abt = val;
             break;
         case Undefined:
-            registers.r14_und = v;
+            cpu->registers.r14_und = val;
             break;
         }
         break;
     case 0xF:
-        registers.r15 = v;
+        cpu->registers.r15 = val;
         break;
     }
 }
 
-static inline void set_cc(uint8_t n, uint8_t z, uint8_t c, uint8_t v) {
-    switch (PROCESSOR_MODE) {
-    case User:
-    case System:
-        if (n != CC_UNMOD) registers.cspr = n ? (1 << 31) | registers.cspr : ~(1 << 31) & registers.cspr;
-        if (z != CC_UNMOD) registers.cspr = z ? (1 << 30) | registers.cspr : ~(1 << 30) & registers.cspr;
-        if (c != CC_UNMOD) registers.cspr = c ? (1 << 29) | registers.cspr : ~(1 << 29) & registers.cspr;
-        if (v != CC_UNMOD) registers.cspr = v ? (1 << 28) | registers.cspr : ~(1 << 28) & registers.cspr;
-        break;
-    case FIQ:
-        if (n != CC_UNMOD) registers.spsr_fiq = n ? (1 << 31) | registers.spsr_fiq : ~(1 << 31) & registers.spsr_fiq;
-        if (z != CC_UNMOD) registers.spsr_fiq = z ? (1 << 30) | registers.spsr_fiq : ~(1 << 30) & registers.spsr_fiq;
-        if (c != CC_UNMOD) registers.spsr_fiq = c ? (1 << 29) | registers.spsr_fiq : ~(1 << 29) & registers.spsr_fiq;
-        if (v != CC_UNMOD) registers.spsr_fiq = v ? (1 << 28) | registers.spsr_fiq : ~(1 << 28) & registers.spsr_fiq;
-        break;
-    case IRQ:
-        if (n != CC_UNMOD) registers.spsr_irq = n ? (1 << 31) | registers.spsr_irq : ~(1 << 31) & registers.spsr_irq;
-        if (z != CC_UNMOD) registers.spsr_irq = z ? (1 << 30) | registers.spsr_irq : ~(1 << 30) & registers.spsr_irq;
-        if (c != CC_UNMOD) registers.spsr_irq = c ? (1 << 29) | registers.spsr_irq : ~(1 << 29) & registers.spsr_irq;
-        if (v != CC_UNMOD) registers.spsr_irq = v ? (1 << 28) | registers.spsr_irq : ~(1 << 28) & registers.spsr_irq;
-        break;
-    case Supervisor:
-        if (n != CC_UNMOD) registers.spsr_svc = n ? (1 << 31) | registers.spsr_svc : ~(1 << 31) & registers.spsr_svc;
-        if (z != CC_UNMOD) registers.spsr_svc = z ? (1 << 30) | registers.spsr_svc : ~(1 << 30) & registers.spsr_svc;
-        if (c != CC_UNMOD) registers.spsr_svc = c ? (1 << 29) | registers.spsr_svc : ~(1 << 29) & registers.spsr_svc;
-        if (v != CC_UNMOD) registers.spsr_svc = v ? (1 << 28) | registers.spsr_svc : ~(1 << 28) & registers.spsr_svc;
-        break;
-    case Abort:
-        if (n != CC_UNMOD) registers.spsr_abt = n ? (1 << 31) | registers.spsr_abt : ~(1 << 31) & registers.spsr_abt;
-        if (z != CC_UNMOD) registers.spsr_abt = z ? (1 << 30) | registers.spsr_abt : ~(1 << 30) & registers.spsr_abt;
-        if (c != CC_UNMOD) registers.spsr_abt = c ? (1 << 29) | registers.spsr_abt : ~(1 << 29) & registers.spsr_abt;
-        if (v != CC_UNMOD) registers.spsr_abt = v ? (1 << 28) | registers.spsr_abt : ~(1 << 28) & registers.spsr_abt;
-        break;
-    case Undefined:
-        if (n != CC_UNMOD) registers.spsr_und = n ? (1 << 31) | registers.spsr_und : ~(1 << 31) & registers.spsr_und;
-        if (z != CC_UNMOD) registers.spsr_und = z ? (1 << 30) | registers.spsr_und : ~(1 << 30) & registers.spsr_und;
-        if (c != CC_UNMOD) registers.spsr_und = c ? (1 << 29) | registers.spsr_und : ~(1 << 29) & registers.spsr_und;
-        if (v != CC_UNMOD) registers.spsr_und = v ? (1 << 28) | registers.spsr_und : ~(1 << 28) & registers.spsr_und;
-        break;
-    }
-}
-
-static inline uint32_t fetch() {
-    uint32_t instr;
+static inline Word fetch() {
+    Word instr;
 
     if (THUMB_ACTIVATED) {
-        instr = read_half_word(registers.r15);
-        registers.r15 += 2;
+        instr = read_half_word(cpu->mem, cpu->registers.r15);
+        cpu->registers.r15 += 2;
     } else {
-        instr = read_word(registers.r15);
-        registers.r15 += 4;
+        instr = read_word(cpu->mem, cpu->registers.r15);
+        cpu->registers.r15 += 4;
     }
 
     return instr;
 }
 
-static inline InstrType decode_arm(uint32_t instr) {
-    pipeline = fetch();
+static inline InstrType decode(Word instr) {
+    cpu->pipeline = fetch();
 
-    switch ((instr >> 25) & 0x7) {
-    case 0x0:
-        switch ((instr >> 4) & 0xF) {
-        case 0x1:
-            if (((instr >> 8) & 0xF) == 0xF) return BranchExchange;
-            return DataProcessing;
-        case 0x9:
-            fprintf(stderr, "unhandled decoding: %08X\n", instr);
-            exit(1);
-        case 0xB:
-        case 0xD: return HalfwordDataTransfer;
-        default: return DataProcessing;
+    if (THUMB_ACTIVATED) {
+        switch ((instr >> 13) & 0x7) {
+        case 0x0:
+            if (((instr >> 11) & 0x3) == 0x3) 
+                return THUMB_2;
+            return THUMB_1;
+        case 0x1: return THUMB_3;
+        case 0x2:
+            switch ((instr >> 10) & 0x7) {
+            case 0x0: return THUMB_4;
+            case 0x1: return THUMB_5;
+            case 0x2:
+            case 0x3: return THUMB_6;
+            }
+            if ((instr >> 9) & 1)
+                return THUMB_8;
+            return THUMB_7;
+        case 0x3: return THUMB_9;
+        case 0x5:
+            if (((instr >> 12) & 1) == 0) 
+                return THUMB_12;
+            
+            if (((instr >> 9) & 0x3) == 0x2)
+                return THUMB_14;
+            return THUMB_13;
+        case 0x6:
+            switch ((instr >> 12) & 0x3) {
+            case 0x0:
+                return THUMB_15;
+            case 0x1:
+                switch ((instr >> 8) & 0xFF) {
+                case 0b11011111: return THUMB_17;
+                case 0b10111110: 
+                    fprintf(stderr, "[THUMB] BKPT not supported!\n");
+                    exit(1);
+                }
+                return THUMB_16;
+            }
+        case 0x7:
+            if ((instr >> 12) & 1)
+                return THUMB_19;
+            return THUMB_18;
         }
-    case 0x1: return DataProcessing;
-    case 0x2:
-    case 0x3: return SingleDataTransfer;
-    case 0x4: return BlockDataTransfer;
-    case 0x5: return Branch;
-    case 0x6:
-        fprintf(stderr, "coprocessor data transfer\n");
-        exit(1);
-    case 0x7:
-        fprintf(stderr, "unhandled decoding: %08X\n", instr);
-        exit(1);
+
+        return THUMB_BAD_INSTR;
+    } else {
+        switch ((instr >> 25) & 0x7) {
+        case 0x0:
+            switch ((instr >> 4) & 0xF) {
+            case 0x1:
+                if (((instr >> 8) & 0xF) == 0xF) return BranchExchange;
+                goto is_psr_transfer_or_data_transfer;
+            case 0x9:
+                switch ((instr >> 23) & 0x3) {
+                case 0x0:
+                case 0x1: return Multiply;
+                case 0x2: return SingleDataSwap;
+                }
+                fprintf(stderr, "invalid instruction: %08X!\n", instr);
+                exit(1);
+            case 0xB:
+            case 0xD: return HalfwordDataTransfer;
+            default: goto is_psr_transfer_or_data_transfer;
+            }
+        case 0x1: goto is_psr_transfer_or_data_transfer;
+        case 0x2:
+        case 0x3: return SingleDataTransfer;
+        case 0x4: return BlockDataTransfer;
+        case 0x5: return Branch;
+        case 0x6:
+            fprintf(stderr, "coprocessor data transfer\n");
+            exit(1);
+        case 0x7:
+            if ((instr >> 24) & 1) return SoftwareInterrupt;
+            fprintf(stderr, "[ARM] debug not supported!\n", instr);
+            exit(1);
+        default:
+            fprintf(stderr, "[ARM] invalid instruction: #0x%08X\n", instr);
+            exit(1);
+        }
+
+        return ARM_BAD_INSTR;
+    }
+
+    // if ALU instruction for (TEQ,TST,CMP,CMN) and S = 1 -> PSR transfer
+    is_psr_transfer_or_data_transfer: {
+        uint8_t opcode = (instr >> 21) & 0xF;
+        switch (opcode) {
+            case 0x8:
+            case 0x9:
+            case 0xA:
+            case 0xB:
+                if (((instr >> 20) & 1) == 0) {
+                    if (opcode & 1)
+                        return MSR;
+                    return MRS;
+                };
+            default: return DataProcessing;
+        }
     }
 }
 
-static inline int execute(uint32_t instr, InstrType type) {
-    DEBUG_PRINT(("[%s] (%08X) %08X ", THUMB_ACTIVATED ? "THUMB" : "ARM", registers.r15 - 8, instr))
+static inline Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift) {
+    if (shift > 31) {
+        printf("how do i handle this ZEACON?\n");
+        exit(1);
+    }
 
-    int32_t original_pc = registers.r15;
-    int cycles = 0;
+    // LSR#0, ASR#0, ROR#0 converted to LSL#0
+    if (!shift) shift_type = SHIFT_TYPE_LSL;
 
-    if (cond(instr)) {
+    switch (shift_type) {
+    case SHIFT_TYPE_LSL:
+        if (!shift) { // LSL#0: carry unmodified as well as operand_2
+            cpu->shifter_carry = CC_UNMOD;
+            break;
+        }
+        cpu->shifter_carry = (operand_2 << (shift - 1)) >> 31;
+        operand_2 = shift > 31 ? 0 : operand_2 << shift;
+        break;
+    case SHIFT_TYPE_LSR:
+        cpu->shifter_carry = ((int32_t)operand_2 >> (shift - 1)) & 1;
+        operand_2 = (int32_t)operand_2 >> shift;
+        break;
+    case SHIFT_TYPE_ASR:
+        if (!shift) { // ASR#0: operand_2 and carry filled with bit 31 of rm
+            printf("ASR#0\n");
+            exit(1);
+            operand_2 >>= 31;
+            cpu->shifter_carry = operand_2;
+            break;
+        }
+        cpu->shifter_carry = ((int32_t)operand_2 >> (shift - 1)) & 1;
+        operand_2 = (int32_t)operand_2 >> shift;
+        break;
+    case SHIFT_TYPE_ROR:
+        operand_2 = (operand_2 >> (shift % 32)) | (operand_2 << (32 - (shift % 32)));
+        cpu->shifter_carry = operand_2 >> 31;
+        break;
+    }
+    return operand_2;
+}
+
+static inline int arm_exec_instr(uint32_t instr, InstrType type) {
+    uint8_t cond = (instr >> 28) & 0xF;
+
+    if (eval_cond(cond)) {
         switch (type) {
         case Branch: {
-            bit with_link = (instr >> 24) & 1;
+            Bit with_link = (instr >> 24) & 1;
             int32_t offset = (instr & 0xFFFFFF) << 8;
-            
-            if (with_link & !THUMB_ACTIVATED) registers.r14 = registers.r15 - 4;
-            registers.r15 += (offset >> 8) * 4;
 
-            DEBUG_PRINT(("B%s%s #0x%X\n", with_link ? "L" : "", cond_to_cstr(instr), registers.r15))
+            if (with_link & !THUMB_ACTIVATED) set_reg(0xE, cpu->registers.r15 - 4);
+            cpu->registers.r15 += (offset >> 8) * 4;
+
+            DEBUG_PRINT(("B%s%s #0x%X\n", with_link ? "L" : "", cond_to_cstr(cond), cpu->registers.r15))
+            break;
+        }
+        case BranchExchange: {
+            uint8_t opcode = (instr >> 4) & 0xF;
+            uint8_t rn = instr & 0xF;
+            uint32_t rn_val = get_reg(rn);
+
+            switch (opcode) {
+            case 0x1:
+                DEBUG_PRINT(("BX%s %s\n", cond_to_cstr(cond), register_to_cstr(rn)))
+                if (rn == 0xF) {
+                    printf("r15 BX edge case\n");
+                    exit(1);
+                }
+                
+                if (rn_val & 1) // switch mode to THUMB
+                    cpu->registers.cpsr |= 0x20;
+                
+                // masked bit 0 for alignment
+                cpu->registers.r15 = rn_val & ~1U; 
+
+                break;
+            case 0x2:
+                DEBUG_PRINT(("BXJ"))
+                exit(1);
+                break;
+            case 0x3:
+                DEBUG_PRINT(("BLX"))
+                exit(1);
+                break;
+            default:
+                fprintf(stderr, "BX invalid opcode\n");
+                exit(1);
+            }
             break;
         }
         case BlockDataTransfer: {
-            bit p = (instr >> 24) & 1;
-            bit u = (instr >> 23) & 1;
-            bit s = (instr >> 22) & 1;
-            bit w = (instr >> 21) & 1;
-            bit l = (instr >> 20) & 1;
+            Bit p = (instr >> 24) & 1;
+            Bit u = (instr >> 23) & 1;
+            Bit s = (instr >> 22) & 1;
+            Bit w = (instr >> 21) & 1;
+            Bit l = (instr >> 20) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint16_t reg_list = instr & 0xFFFF;
 
             if (s) {
-                fprintf(stderr, "FUCK THE S BIT NEEDS TO BE HANDLED\n");
+                fprintf(stderr, "FUCK THE S Bit NEEDS TO BE HANDLED\n");
                 exit(1);
             }
 
             if (l) { // LDM (load from memory)
-                DEBUG_PRINT(("LDM%s%s %s, { ", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn)))
+                DEBUG_PRINT(("LDM%s%s %s, { ", cond_to_cstr(cond), amod_to_cstr(p, u), register_to_cstr(rn)))
 
                 int amod = (p << 1) | u;
                 switch (amod) {
@@ -423,10 +642,10 @@ static inline int execute(uint32_t instr, InstrType type) {
                         bool should_transfer = (reg_list >> reg) & 1;
 
                         if (should_transfer) {
-                            uint32_t base = get_register_val(rn);
+                            uint32_t base = get_reg(rn);
                             uint32_t addr = amod == 1 ? base : base + 4;
-                            set_register(reg, read_word(addr));
-                            if (w) set_register(rn, base + 4);
+                            set_reg(reg, read_word(cpu->mem, addr));
+                            if (w) set_reg(rn, base + 4);
                             DEBUG_PRINT(("%s ", register_to_cstr(reg), reg))
                         }
                     }
@@ -434,15 +653,19 @@ static inline int execute(uint32_t instr, InstrType type) {
                     break;
                 case 0: // DA
                 case 2: // DB
+                    printf("BOOP!");
+                    exit(1);
                     break;
                 }
             } else { // STM (store to memory)
-                DEBUG_PRINT(("STM%s%s %s, { ", cond_to_cstr(instr), amod_to_cstr(p, u), register_to_cstr(rn)))
+                DEBUG_PRINT(("STM%s%s %s, { ", cond_to_cstr(cond), amod_to_cstr(p, u), register_to_cstr(rn)))
 
                 int amod = (p << 1) | u;
                 switch (amod) {
                 case 1: // IA
                 case 3: // IB
+                    printf("GOOP!");
+                    exit(1);
                     break;
                 case 0: // DA
                 case 2: // DB
@@ -450,10 +673,10 @@ static inline int execute(uint32_t instr, InstrType type) {
                         bool should_transfer = (reg_list >> reg) & 1;
 
                         if (should_transfer) {
-                            uint32_t base = get_register_val(rn);
+                            uint32_t base = get_reg(rn);
                             uint32_t addr = amod == 0 ? base : base - 4;
-                            write_word(addr, get_register_val(reg));
-                            if (w) set_register(rn, base - 4);
+                            write_word(cpu->mem, addr, get_reg(reg));
+                            if (w) set_reg(rn, base - 4);
                             DEBUG_PRINT(("%s ", register_to_cstr(reg), reg))
                         }
                     }
@@ -464,25 +687,23 @@ static inline int execute(uint32_t instr, InstrType type) {
             break;
         }
         case DataProcessing: {
-            bit barrel_shifter_carry_output = 0; // stores last bit shifted out of barrel shifter
+            Bit i = (instr >> 25) & 1;
+            Bit s = (instr >> 20) & 1;
 
             uint8_t opcode = (instr >> 21) & 0xF;
-            bit i = (instr >> 25) & 1;
-            bit s = (instr >> 20) & 1;
-
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
-            uint32_t operand2;
+            Word operand2;
 
             if (i) {
-                operand2 = ROR(instr & 0xFF, ((instr & 0xF00) >> 8) * 2);
+                
+                operand2 = barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr & 0xF00) >> 8) * 2);
             } else {
-                uint8_t shift_type = (instr >> 5) & 0x3;
-                bit r = (instr >> 4) & 1;
-                uint8_t rm = instr & 0xF;
+                Bit r = (instr >> 4) & 1;
 
-                uint8_t shift_amount;
+                uint8_t shift_type = (instr >> 5) & 0x3;
+                uint8_t rm = instr & 0xF;
 
                 if (r) {
                     if (rm == 0xF || rn == 0xF) {
@@ -492,160 +713,177 @@ static inline int execute(uint32_t instr, InstrType type) {
                     DEBUG_PRINT(("i = 0 r = 1 branch case\n"))
                     exit(1);
                 } else {
-                    if (rm == 0xF || rn == 0xF) {
-                        printf("rm = r15 or rn = r15 edge case ALU pc + 8\n");
-                        exit(1);
-                    }
-                    shift_amount = (instr >> 7) & 0x1F;
-                }
-
-                switch (shift_type) {
-                case 0:
-                    barrel_shifter_carry_output = (get_register_val(rm) << (shift_amount - 1)) >> 30;
-                    operand2 = shift_amount > 31 ? 0 : get_register_val(rm) << shift_amount;
-                    break;
-                case 1:
-                    exit(1);
-                case 2: 
-                    exit(1);
-                case 3:
-                    exit(1);
+                    operand2 = barrel_shifter(shift_type, get_reg(rm), (instr >> 7) & 0x1F);
                 }
             }
 
+            Word rn_val = get_reg(rn);
+
             switch (opcode) {
-            case 0x0:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
-            case 0x1:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
-            case 0x2:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
+            case 0x0: {
+                DEBUG_PRINT(("AND%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                Word result = get_reg(rn) & operand2;
+                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+                set_reg(rd, result);
+                break;
+            }
+            case 0x1: {
+                DEBUG_PRINT(("EOR%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                Word result = get_reg(rn) ^ operand2;
+                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+                set_reg(rd, result);
+                break;
+            }
+            case 0x2: {
+                DEBUG_PRINT(("SUB%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                Word result = rn_val - operand2;
+                set_cc(result >> 31, result == 0, rn_val >= operand2, CC_UNMOD); // TODO: FIX V FLAG
+                set_reg(rd, result);
+                break;
+            }
             case 0x3:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
             case 0x4: {
-                int32_t result = get_register_val(rn) + operand2;
-                if (s) {
-                    DEBUG_PRINT(("TODO set flags for ADD ALU\n"))
-                    exit(1);
-                }
-                set_register(rd, result);
-                DEBUG_PRINT(("ADD%s %s, %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rd), register_to_cstr(rn), operand2))
+                DEBUG_PRINT(("ADD%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
+                uint64_t result = get_reg(rn) + operand2;
+                set_reg(rd, result);
+                if (s) set_cc(result >> 31, result == 0, result > UINT32_MAX, CC_UNMOD); // TODO: FIX V FLAG
                 break;
             }
-            case 0x5:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
+            case 0x5: {
+                DEBUG_PRINT(("ADC%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
                 exit(1);
+
+                uint64_t unsigned_result = (uint64_t)get_reg(rn) + ((uint64_t)operand2) + (uint64_t)get_cc(C);
+                int64_t signed_result = (int64_t)get_reg(rn) + ((int64_t)(int32_t)operand2) + (int64_t)get_cc(C);
+                if (s)
+                    set_cc(signed_result >> 63, unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                set_reg(rd, unsigned_result);
+                exit(1);
+                break;
+            }
             case 0x6:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
+                DEBUG_PRINT(("SBC%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
                 exit(1);
+                uint64_t unsigned_result = get_reg(rn) + ((uint64_t)~operand2 + 1) + ((uint64_t)~get_cc(C) + 1);
+                int64_t signed_result = get_reg(rn) + ((int64_t)(int32_t)~operand2 + 1) + ((int64_t)(int32_t)~get_cc(C) + 1);
+                if (s)
+                    set_cc(signed_result >> 63, unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                set_reg(rd, unsigned_result);
+                break;
             case 0x7:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
             case 0x8: {
-                int32_t result = get_register_val(rn) & operand2;
-                set_cc(result < 0, result == 0, !i ? CC_UNMOD : barrel_shifter_carry_output, CC_UNMOD);
-                DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2))
+                DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                Word result = get_reg(rn) & operand2;
+                set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
                 break;
             }
             case 0x9: {
-                int32_t result = get_register_val(rn) ^ operand2;
-                set_cc(result < 0, result == 0, !i ? CC_UNMOD : barrel_shifter_carry_output, CC_UNMOD);
-                DEBUG_PRINT(("TEQ%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2))
+                DEBUG_PRINT(("TEQ%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                Word result = get_reg(rn) ^ operand2;
+                set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
                 break;
             }
             case 0xA: {
-                int32_t result = get_register_val(rn) - operand2;
-                set_cc(result < 0, result == 0, result > 0, operand2 < 0 && get_register_val(rn) < 0 && result > 0);
-                DEBUG_PRINT(("CMP%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rn), operand2))
+                DEBUG_PRINT(("CMP%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                Word result = rn_val - operand2;
+                set_cc(result >> 31, result == 0, rn_val >= operand2, CC_UNMOD); // TODO: FIX V FLAG
                 break;
             }
-            case 0xB:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
+            case 0xB: {
+                DEBUG_PRINT(("CMN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
                 exit(1);
+                break;
+            }
             case 0xC:
-                set_register(rd, get_register_val(rn) | operand2);                
-                if (s) {
-                    fprintf(stderr, "SET FLAGS FOR OxC ALU THING\n");
-                    exit(1);
-                }
-                DEBUG_PRINT(("ORR%s %s, %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rd), register_to_cstr(rn), operand2))
+                DEBUG_PRINT(("ORR%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
+                Word result = get_reg(rn) | operand2;
+                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+                set_reg(rd, result);           
                 break;
             case 0xD:
-                set_register(rd, operand2);
-                if (s) set_cc(operand2 < 0, operand2 == 0, !i ? CC_UNMOD : barrel_shifter_carry_output, CC_UNMOD);
-                DEBUG_PRINT(("MOV%s %s, #0x%X\n", cond_to_cstr(instr), register_to_cstr(rd), operand2))
+                DEBUG_PRINT(("MOV%s%s %s, #0x%X\n", cond_to_cstr(cond), s ? "S" : "", register_to_cstr(rd), operand2))
+                if (s) set_cc(operand2 >> 31, operand2 == 0, cpu->shifter_carry, CC_UNMOD);
+                set_reg(rd, operand2);
                 break;
             case 0xE:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
-            case 0xF:
+            case 0xF: {
+                DEBUG_PRINT(("MVN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), operand2))
+                Word result = ~operand2;
+                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+                set_reg(rd, result);
+                break;
+            }
+            default:
                 fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
                 exit(1);
             }
             break;
         }
         case HalfwordDataTransfer: {
-            bit p = (instr >> 24) & 1;
-            bit u = (instr >> 23) & 1; // if unset offset is negative (subtracted from base)
-            bit i = (instr >> 22) & 1;
-            bit w = (instr >> 21) & 1;
-            bit l = (instr >> 20) & 1;
+            Bit p = (instr >> 24) & 1;
+            Bit u = (instr >> 23) & 1; // if unset offset is negative (subtracted from base)
+            Bit i = (instr >> 22) & 1;
+            Bit w = (instr >> 21) & 1;
+            Bit l = (instr >> 20) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
-            int32_t offset = i ? ((((instr >> 8) & 0xF) << 4) | (instr & 0xF)) : get_register_val(instr & 0xF);
+            int32_t offset = i ? ((((instr >> 8) & 0xF) << 4) | (instr & 0xF)) : get_reg(instr & 0xF);
             if (!u) offset = -offset;
 
-            uint32_t address = get_register_val(rn) + offset;
+            uint32_t address = get_reg(rn) + offset;
 
             if (l) {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
+                    DEBUG_PRINT(("LDR%sH ", cond_to_cstr(cond)))
                     if (p) {
-                        set_register(rd, read_half_word(address));
+                        set_reg(rd, read_half_word(cpu->mem, address));
                     } else {
-                        set_register(rd, read_half_word(get_register_val(rn)));
+                        set_reg(rd, read_half_word(cpu->mem, get_reg(rn)));
                     }
-                    DEBUG_PRINT(("LDR%sH ", cond_to_cstr(instr)))
                     break;
                 case 2:
-                    DEBUG_PRINT(("LDR%sSB ", cond_to_cstr(instr)))
+                    DEBUG_PRINT(("LDR%sSB ", cond_to_cstr(cond)))
                     break;
                 case 3:
-                    DEBUG_PRINT(("LDR%sSH ", cond_to_cstr(instr)))
+                    DEBUG_PRINT(("LDR%sSH ", cond_to_cstr(cond)))
                     break;
                 }
             } else {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
                     if (p) {
-                        write_half_word(address, get_register_val(rd));
+                        write_half_word(cpu->mem, address, get_reg(rd));
                     } else {
-                        write_half_word(get_register_val(rn), get_register_val(rd));
+                        write_half_word(cpu->mem, get_reg(rn), get_reg(rd));
                     }
-                    DEBUG_PRINT(("STR%sH ", cond_to_cstr(instr)))
+                    DEBUG_PRINT(("STR%sH ", cond_to_cstr(cond)))
                     break;
                 case 2:
-                    DEBUG_PRINT(("LDR%sD ", cond_to_cstr(instr)))
+                    DEBUG_PRINT(("LDR%sD ", cond_to_cstr(cond)))
                     break;
                 case 3:
-                    DEBUG_PRINT(("STR%sD ", cond_to_cstr(instr)))
+                    DEBUG_PRINT(("STR%sD ", cond_to_cstr(cond)))
                     break;
                 }
             }
 
             // post indexing implies writeback
-            if ((p && w) || !p) set_register(rn, address);
+            if ((p && w) || !p) set_reg(rn, address);
 
             DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
             if (p) {
+                DEBUG_PRINT(("[%s", register_to_cstr(rn)))
+
                 if (i) {
-                    DEBUG_PRINT(("[%s", register_to_cstr(rn)))
                     if (offset) {
                         DEBUG_PRINT((", #0x%X]", !u ? -offset : offset))
                     } else {
@@ -671,90 +909,171 @@ static inline int execute(uint32_t instr, InstrType type) {
             break;
         }
         case SingleDataTransfer: {
-            bit i = (instr >> 25) & 1;
-            bit p = (instr >> 24) & 1;
-            bit u = (instr >> 23) & 1;
-            bit b = (instr >> 22) & 1; // byte transfers if set otherwise one word
-            bit w = (instr >> 21) & 1;
-            bit l = (instr >> 20) & 1;
+            Bit i = (instr >> 25) & 1;
+            Bit p = (instr >> 24) & 1;
+            Bit u = (instr >> 23) & 1;
+            Bit b = (instr >> 22) & 1;
+            Bit t = (instr >> 21) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
+            uint8_t rm = instr & 0xF;
 
-            int32_t offset = i ? -1 : instr & 0xFFF;
-            if (!u) offset = -offset;
+            uint8_t shift_amount = (instr >> 7) & 0x1F;
 
-            uint32_t address = get_register_val(rn) + offset;
+            Word operand_2 = i ? 
+                barrel_shifter((instr >> 5) & 0x3, get_reg(instr & 0xF), (instr >> 7) & 0x1F) : 
+                instr & 0xFFF;
 
-            if (i) {
-                fprintf(stderr, "i bit set in singledatatransfer unhandled\n");
+            if (!u)
+                operand_2 = ~operand_2 + 1;
+
+            Word addr = get_reg(rn) + operand_2;
+            bool write_back = !p || (p && t);
+
+            if (rd == 0xF) {
+                printf("POOP ON A STICK!\n");
                 exit(1);
             }
 
-            if (l) { // LDR (load from memory)
-                if (p) { // pre (add offset before transfer)
-                    set_register(rd, b ? read_word(address) & 0xFF : read_word(address));
-                } else { // post (add offset after transfer)
-                    if (w) {
-                        fprintf(stderr, "t bit set FUCK");
-                        exit(1);
-                    }
-                    fprintf(stderr, "p bit not set single data transfer");
-                    exit(1);
-                }
-                DEBUG_PRINT(("LDR%s%s ", cond_to_cstr(instr), b ? "B" : " "))
-            } else { // STR (store to memory)
-                if (p) { 
-                    write_word(address, b ? get_register_val(rd) & 0xFF : get_register_val(rd));
+            switch ((instr >> 20) & 1) {
+            case 0:
+                DEBUG_PRINT(("STR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t ? "T" : ""))
+                if (p) {
+                    if (b) { write_byte(cpu->mem, addr, get_reg(rd)); } else { write_word(cpu->mem, addr, get_reg(rd)); }
                 } else {
-                    if (w) {
-                        fprintf(stderr, "t bit set FUCK");
-                        exit(1);
-                    }
-                    write_word(address - offset, b ? get_register_val(rd) & 0xFF : get_register_val(rd));
+                    if (b) { write_byte(cpu->mem, get_reg(rn), get_reg(rd)); } else { write_word(cpu->mem, get_reg(rn), get_reg(rd)); }
                 }
-                DEBUG_PRINT(("STR%s ", cond_to_cstr(instr)))
+                break;
+            case 1:
+                DEBUG_PRINT(("LDR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t ? "T" : ""))
+                if (p) {
+                    if (b) { set_reg(rd, read_word(cpu->mem, addr) & 0xFF); } else { set_reg(rd, read_word(cpu->mem, addr)); }
+                } else {
+                    if (b) { set_reg(rd, read_word(cpu->mem, get_reg(rn)) & 0xFF); } else { set_reg(rd, read_word(cpu->mem, get_reg(rn))); }
+                }
+                break;
             }
 
-            if ((p && w) || !p) set_register(rn, address);
+            if (write_back) set_reg(rn, addr);
 
-            // TODO: FIX THIS BULLSHIT!
+            DEBUG_PRINT(("%s, [%s", register_to_cstr(rd), register_to_cstr(rn)))
+            if (p) {
+                DEBUG_PRINT((", #0x%X]%s", operand_2, write_back ? "!" : ""))
+            } else {
+                DEBUG_PRINT(("], #0x%X", operand_2))
+            }
+            DEBUG_PRINT(("\n"))
+            break;
+        }
+        case SoftwareInterrupt:
+            DEBUG_PRINT(("SWI%s #%X\n", cond_to_cstr(cond), instr & 0xFFFFFF))
+            cpu->registers.r14_svc = cpu->registers.r15 - 4;
+            cpu->registers.spsr_svc = cpu->registers.cpsr;
+            SET_PROCESSOR_MODE(Supervisor)
+            cpu->registers.r15 = 0x00000008;
+            break;
+        case Multiply: {
+            uint8_t opcode = (instr >> 21) & 0xF;
 
-            DEBUG_PRINT(("%s, \n", register_to_cstr(rd)))
-            // if (p) {
-            //     if (i) {
-            //         DEBUG_PRINT(("[%s", register_to_cstr(rn)))
-            //         if (offset) {
-            //             DEBUG_PRINT((", #0x%X]", !u ? -offset : offset))
-            //         } else {
-            //             DEBUG_PRINT(("]"))
-            //         }
-            //     } else {
-            //         DEBUG_PRINT((", %s]", register_to_cstr(instr & 0xF)))
-            //     }
+            Bit s = (instr >> 20) & 1; // Must be 0 for Halfword & UMAAL
 
-            //     if ((p && t_or_w) || !p) {
-            //         DEBUG_PRINT(("!\n"));
-            //     } else {
-            //         DEBUG_PRINT(("\n"))
-            //     }
-            // } else {
-            //     DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
-            //     if (i) {
-            //         DEBUG_PRINT(("#0x%X\n", !u ? -offset : offset))
-            //     } else {
-            //         DEBUG_PRINT(("%s\n", register_to_cstr(instr & 0xF)))
-            //     }
-            // }
+            uint8_t rd = (instr >> 16) & 0xF;
+            uint8_t rn = (instr >> 12) & 0xF;
+            uint8_t rs = (instr >> 8) & 0xF;
+            uint8_t rm = instr & 0xF;
+
+            if (((instr >> 4) & 0xF) != 0x9) {
+                printf("HALF WORD MULTIPLY\n");
+                exit(1);
+            }
+
+            switch (opcode) {
+            case 0x0:
+                DEBUG_PRINT(("MUL%s%s %s, %s, %s\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
+                if (s) exit(1);
+                set_reg(rd, get_reg(rm) * get_reg(rs));
+                break;
+            case 0x1:
+                DEBUG_PRINT(("MLA%s %s, %s, %s, %s\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs), register_to_cstr(rn)))
+                if (s) exit(1);
+                set_reg(rd, get_reg(rm) * get_reg(rs) + get_reg(rn)); 
+                break;
+            case 0x2:
+                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
+                exit(1);
+                break;
+            case 0x4:
+                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
+                exit(1);
+                break;
+            case 0x5:
+                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
+                exit(1);
+                break;
+            case 0x6:
+                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
+                exit(1);
+                break;
+            case 0x7:
+                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
+                exit(1);
+                break;
+            default:
+                fprintf(stderr, "unexpected opcode for MUL/MLA");
+                exit(1);
+            }
+            break;
+        }
+        case MSR: {
+            DEBUG_PRINT(("MSR%s ", cond_to_cstr(cond)))
+
+            Bit i = (instr >> 25) & 1;
+            Bit psr = (instr >> 22) & 1;
+
+            Bit f = (instr >> 19) & 1;
+            Bit c = (instr >> 16) & 1;
+
+            Word operand = i ?
+                barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr >> 8) & 0xF) * 2) :
+                get_reg(instr & 0xF);
+
+            if (psr) {
+                DEBUG_PRINT(("spsr_<mode>, "))
+                if (f) set_psr_reg((0x00FFFFFF & get_psr_reg()) | (operand & 0xFF000000));
+                if (c) set_psr_reg((0xFFFFFF00 & get_psr_reg()) | (operand & 0x000000FF));
+            } else {
+                DEBUG_PRINT(("cpsr_fc, "))
+                if (f) cpu->registers.cpsr = (0x00FFFFFF & cpu->registers.cpsr) | (operand & 0xFF000000);
+                if (c) cpu->registers.cpsr = (0xFFFFFF00 & cpu->registers.cpsr) | (operand & 0x000000FF);
+            }
+
+            if (i) { DEBUG_PRINT(("#0x%X\n", operand)) } else { DEBUG_PRINT(("%s\n", register_to_cstr(instr & 0xF))) }
+            break;
+        }
+        case MRS: {
+            DEBUG_PRINT(("MRS%s ", cond_to_cstr(instr)))
+
+            Bit i = (instr >> 25) & 1;
+            Bit psr = (instr >> 22) & 1;
+
+            uint8_t rd = (instr >> 12) & 0xF;
+
+            if (psr) {
+                DEBUG_PRINT(("SPSR_<ADDR>\n"))
+
+
+                exit(1);
+            } else {
+                DEBUG_PRINT(("CPSR_FC\n"))
+                exit(1);
+            }
             break;
         }
         default:
             fprintf(stderr, "decoded instruction not handled yet! %d\n", type);
             exit(1);
         }
-
-        // will force pipeline flush if r15 is modified in execute stage
-        if (registers.r15 != original_pc) pipeline = 0;
     } else {
         DEBUG_PRINT(("\n"));
     }
@@ -762,33 +1081,457 @@ static inline int execute(uint32_t instr, InstrType type) {
     return 1;
 }
 
-static inline int tick_cpu() {
-    if (!pipeline) {
-        uint32_t instr = fetch();
-        return execute(instr, decode_arm(instr));
+static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
+    switch (type) {
+    case THUMB_1: {
+        uint8_t opcode = (instr >> 11) & 0x3;
+        uint8_t offset = (instr >> 6) & 0x1F;
+
+        uint8_t rs = (instr >> 3) & 0x7;
+        uint8_t rd = instr & 0x7;
+
+        Word operand_2 = barrel_shifter(opcode, get_reg(rs), offset);
+        set_reg(rd, operand_2);
+        set_cc(operand_2 >> 31, operand_2 == 0, cpu->shifter_carry, CC_UNMOD);
+
+        switch (opcode) {
+        case 0x0:
+            DEBUG_PRINT(("LSLS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
+            break;
+        case 0x1:
+            DEBUG_PRINT(("LSRS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
+            break;
+        case 0x2:
+            DEBUG_PRINT(("ASRS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
+            break;
+        }
+        break;
+    }
+    case THUMB_2: {
+        uint8_t rn_or_imm = (instr >> 6) & 0x7;
+        uint8_t rs = (instr >> 3) & 0x7;
+        uint8_t rd = instr & 0x7;
+
+        Word rs_val = get_reg(rs);
+
+        switch ((instr >> 9) & 0x3) {
+        case 0x0: {
+            DEBUG_PRINT(("ADDS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
+            uint64_t result = (uint64_t)get_reg(rs) + get_reg(rn_or_imm);
+            set_reg(rd, result);
+            set_cc(result >> 31, result == 0, result > UINT32_MAX, CC_UNMOD); // TODO: FIX V FLAG
+            break;
+        }
+        case 0x1: {
+            DEBUG_PRINT(("SUBS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
+            Word rn_val = get_reg(rn_or_imm);
+            Word result = rs_val - rn_val;
+            set_reg(rd, result);
+            set_cc(result >> 31, result == 0, rs_val >= rn_val, CC_UNMOD); // TODO: FIX V FLAG
+            break;
+        }
+        case 0x2: {
+            printf("THUMB_2\n");
+            exit(1);
+        }
+        case 0x3:
+            printf("SUBS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm);
+            exit(1);
+            break;
+        }
+        break;
+    }
+    case THUMB_3: {
+        uint8_t opcode = (instr >> 11) & 0x3;
+
+        uint8_t rd = (instr >> 8) & 0x7;
+        uint8_t nn = instr & 0xFF;
+
+        Word rd_val = get_reg(rd);
+
+        switch (opcode) {
+        case 0x0:
+            DEBUG_PRINT(("MOVS %s, #0x%X\n", register_to_cstr(rd), nn))
+            set_reg(rd, nn);
+            set_cc(nn >> 7, nn == 0, CC_UNMOD, CC_UNMOD);
+            break;
+        case 0x1: {
+            DEBUG_PRINT(("CMPS %s, #0x%X\n", register_to_cstr(rd), nn))
+            Word result = rd_val - nn;
+            set_cc(result >> 31, result == 0, rd_val >= nn, CC_UNMOD); // TODO: FIX V FLAG
+            break;
+        }
+        case 0x2:
+            DEBUG_PRINT(("ADDS %s, #0x%X\n", register_to_cstr(rd), nn))
+            Word result = get_reg(rd) + nn;
+            set_reg(rd, result);
+            set_cc(result >> 31, result == 0, CC_UNSET, CC_UNMOD); // TODO: FIX C AND V FLAG
+            break;
+        case 0x3: {
+            DEBUG_PRINT(("SUBS %s, #0x%X\n", register_to_cstr(rd), nn))
+            Word result = rd_val - nn;
+            set_cc(result >> 31, result == 0, rd_val >= nn, CC_UNMOD); // TODO: FIX V FLAG
+            set_reg(rd, result);
+            break;
+        }
+        }
+        break;
+    }
+    case THUMB_4: {
+        uint8_t rs = (instr >> 3) & 0x7;
+        uint8_t rd = instr & 0x7;
+
+        Word rd_val = get_reg(rd);
+        Word rs_val = get_reg(rs);
+
+        switch ((instr >> 6) & 0xF) {
+        case 0xA: {
+            DEBUG_PRINT(("CMP "))
+            Word result = rd_val - rs_val;
+            set_cc(result >> 31, result == 0, rd_val >= rs_val, CC_UNMOD); // TODO: FIX V FLAG            
+            break;
+        }
+        case 0xE: {
+            DEBUG_PRINT(("BICS "))
+            Word result = rd_val & ~rs_val;
+            set_reg(rd, result);
+            set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            break;
+        }
+        default:
+            fprintf(stderr, "thumb alu missing 0x%X\n", (instr >> 6) & 0xF);
+            exit(1);
+        }
+        DEBUG_PRINT(("%s, %s\n", register_to_cstr(rd), register_to_cstr(rs)))
+        break;
+    }
+    case THUMB_5: {
+        uint8_t rs = (((instr >> 6) & 1) << 3) | ((instr >> 3) & 0x7); // MSBs 
+        uint8_t rd = (((instr >> 7) & 1) << 3) | (instr & 0x7); // MSBd
+
+        Word rs_val = get_reg(rs);
+
+        switch ((instr >> 8) & 0x3) {
+        case 0x0:
+            printf("ADD\n");
+            exit(1);
+            break;
+        case 0x1:
+            printf("CMP\n");
+            exit(1);
+            break;
+        case 0x2: {
+            if (rd == rs == 8) { // R8 = R8
+                DEBUG_PRINT(("NOP\n"))
+                break;
+            } else {
+                DEBUG_PRINT(("MOV %s, %s\n", register_to_cstr(rd), register_to_cstr(rs)))
+                set_reg(rd, get_reg(rs));
+                break;
+            }
+        }
+        case 0x3:
+            DEBUG_PRINT(("BX %s\n", register_to_cstr(rs)))
+
+            if (rs == 0xF) {
+                printf("THUMB special case r15 BX\n");
+                exit(1);
+            }
+
+            if (!(rs_val & 1)) // switch mode to ARM
+                cpu->registers.cpsr =  ~(1 << 5) & cpu->registers.cpsr;
+            cpu->registers.r15 = rs_val & ~1U; // masked bit 0 for alignment
+            break;
+        }
+        break;
+    }
+    case THUMB_6: {
+        uint8_t rd = (instr >> 8) & 0x7;
+        uint16_t nn = (instr & 0xFF) * 4;
+        DEBUG_PRINT(("LDR %s, [PC, #0x%X]\n", register_to_cstr(rd), nn))
+        set_reg(rd, read_word(cpu->mem, (cpu->registers.r15 & ~2) + nn));
+        break;
+    }
+    case THUMB_7: {
+        printf("THUMB_7\n");
+        exit(1);
+    }
+    case THUMB_9: {
+        uint8_t nn = (instr >> 6) & 0x1F; // nn*4 for WORD
+        uint8_t rb = (instr >> 3) & 0x7;
+        uint8_t rd = instr & 0x7;
+
+        switch ((instr >> 11) & 0x3) {
+        case 0x0:
+            DEBUG_PRINT(("STR %s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn * 4))
+            write_word(cpu->mem, get_reg(rb) + nn * 4, get_reg(rd));
+            break;
+        case 0x1:
+            DEBUG_PRINT(("LDR %s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn * 4))
+            set_reg(rd, read_word(cpu->mem, get_reg(rb) + nn * 4));
+            break;
+        case 0x2:
+            DEBUG_PRINT(("STRB %s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn))
+            write_word(cpu->mem, get_reg(rb) + nn, get_reg(rd) & 0xFF);
+            exit(1);
+            break;
+        case 0x3:
+            DEBUG_PRINT(("LDRB Rd,[Rb,#nn]"))
+            exit(1);
+            break;
+        }
+        break;
+    }
+    case THUMB_10: {
+        printf("THUMB_10");
+        exit(1);
+
+        uint8_t rb = (instr >> 3) & 0x7;
+        uint8_t rd = instr & 0x7;
+        uint8_t nn = ((instr >> 6) & 0x1F) * 2;
+
+        switch ((instr >> 11) & 1) {
+        case 0:
+            DEBUG_PRINT(("STRH "))
+            
+            break;
+        case 1:
+            DEBUG_PRINT(("LDRH "))
+
+            break;
+        }
+
+        DEBUG_PRINT(("%s, [%s, #0x%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn))
+        exit(1);
+        break;
+    }
+    case THUMB_11: {
+        printf("THUMB 11\n");
+        exit(1);
+    }
+    case THUMB_12: {
+        uint8_t rd = (instr >> 8) & 0x7;
+        uint8_t nn = (instr & 0xFF) * 4; // (0-1020, step 4)
+
+        switch ((instr >> 11) & 1) {
+        case 0:
+            DEBUG_PRINT(("ADD %s, pc, #0x%X\n", register_to_cstr(rd), nn))
+            set_reg(rd, cpu->registers.r15 + nn);
+            break;
+        case 1:
+            printf("ADD 1");
+            exit(1);
+        }
+        break;
+    }
+    case THUMB_13: {
+        exit(1);
+        break;
+    }
+    case THUMB_14: {
+        Bit pc_or_lr = (instr >> 8) & 1; // use pc/lr registers respectively instead of sp
+        uint8_t reg_list = instr & 0xFF;
+
+        switch ((instr >> 11) & 1) {
+        case 0x0: { // equivelant to STMDB
+            DEBUG_PRINT(("PUSH { "))
+            DEBUG_PRINT(("%s", pc_or_lr ? "lr " : ""))
+
+            // push lr to stack
+            if (pc_or_lr) {
+                set_reg(0xD, get_reg(0xD) - 4);
+                write_word(cpu->mem, get_reg(0xD), get_reg(0xE));
+            }
+
+            for (int i = 7; i >= 0; i--) {
+                if ((reg_list >> i) & 1) {
+                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
+                    set_reg(0xD, get_reg(0xD) - 4);
+                    write_word(cpu->mem, get_reg(0xD), get_reg(i));
+                }
+            }
+
+            DEBUG_PRINT(("}\n"))
+            break;
+        }
+        case 0x1: // equivelant to LDMIA
+            DEBUG_PRINT(("POP { "))
+            for (int i = 0; i < 8; i++) {
+                if ((reg_list >> i) & 1) {
+                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
+                    set_reg(i, read_word(cpu->mem, get_reg(0xD)));
+                    set_reg(0xD, get_reg(0xD) + 4);
+                }
+            }
+
+            // last popped value assigned to PC
+            if (pc_or_lr) {
+                cpu->registers.r15 = read_word(cpu->mem, get_reg(0xD));
+                set_reg(0xD, get_reg(0xD) + 4);
+            }
+
+            DEBUG_PRINT(("%s\n", pc_or_lr ? "pc }" : "}"))
+            break;
+        }
+        break;
+    }
+    case THUMB_15: {
+        uint8_t rb = (instr >> 8) & 0x7;
+        uint8_t r_list = instr & 0xFF;
+
+        switch ((instr >> 11) & 1) {
+        case 0:
+            DEBUG_PRINT(("STMIA %s!, { ", register_to_cstr(rb)))
+            for (int i = 0; i < r_list; i++) {
+                if ((r_list >> i) & 1) {
+                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
+                    Word base = get_reg(rb);
+                    write_word(cpu->mem, base, get_reg(i));
+                    set_reg(rb, base + 4);
+                }
+            }
+            DEBUG_PRINT(("}"))
+            break;
+        case 1:
+            DEBUG_PRINT(("LDMIA %s!, { ", register_to_cstr(rb)))
+            for (int i = 0; i < r_list; i++) {
+                if ((r_list >> i) & 1) {
+                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
+                    Word base = get_reg(rb);
+                    set_reg(i, read_word(cpu->mem, base));
+                    set_reg(rb, base + 4);
+                }
+            }
+            DEBUG_PRINT(("}"))
+            break;
+        }
+        DEBUG_PRINT(("\n"))
+        break;
+    }
+    case THUMB_16: {
+        uint8_t cond = (instr >> 8) & 0xF;
+        int32_t offset = (int32_t)(int8_t)(instr & 0xFF) * 2;
+        if (eval_cond(cond)) {
+            cpu->registers.r15 += offset;
+            DEBUG_PRINT(("B%s #0x%X", cond_to_cstr(cond), cpu->registers.r15))
+        }
+        DEBUG_PRINT(("\n"))
+        break;
+    }
+    case THUMB_17: {
+        printf("SWI\n");
+        exit(1);
+
+        uint8_t comment_field = instr & 0xFF;
+
+        switch ((instr >> 8) & 0xFF) {
+        case 0b11011111:
+            DEBUG_PRINT(("SWI #0x%X", comment_field))
+
+            break;
+        default:
+            fprintf(stderr, "THUMB.17 Error: unhandled opcode!\n");
+            exit(1);
+        }
+
+        printf("THUMB_17\n");
+        exit(1);
+        break;
+    }
+    case THUMB_18: {
+        printf("THUMB_18");
+        exit(1);
+        break;
+    }
+    case THUMB_19: { // 2 16 bit instructions in memory
+        uint32_t offset_high = instr & 0x7FF;
+        uint32_t offset_low = cpu->pipeline & 0x7FF;
+
+        // apply sign extension to upper bits of offset
+        offset_high <<= 21;
+        offset_high = (int32_t)offset_high >> 21;
+
+        cpu->registers.r14 = cpu->registers.r15 | 1;
+        cpu->registers.r15 = cpu->registers.r15 + (offset_high << 12) + (offset_low << 1);
+
+        switch ((cpu->pipeline >> 11) & 0x1F) {
+        case 0b11111:
+            DEBUG_PRINT(("BL #0x%X\n", cpu->registers.r15))
+            break;
+        case 0b11101:
+            DEBUG_PRINT(("BLX #0x%X\n", cpu->registers.r15))
+            exit(1);
+        }
+
+        return 2;
+    }
+    default:
+        fprintf(stderr, "unhandled thumb instruction type\n");
+        exit(1);
+    }
+
+    return 1;
+}
+
+static inline int execute(uint32_t instr, InstrType type) {
+    int32_t original_pc = cpu->registers.r15;
+    int cycles = 0;
+
+    if (THUMB_ACTIVATED) {
+        DEBUG_PRINT(("[THUMB] (%08X) %04X ", cpu->registers.r15 - 4, instr))
+        cycles = thumb_exec_instr(instr, type);
     } else {
-        return execute(pipeline, decode_arm(pipeline));
+        DEBUG_PRINT(("[ARM] (%08X) %08X ", cpu->registers.r15 - 8, instr))
+        cycles = arm_exec_instr(instr, type);
+    }
+
+    // will force pipeline flush if r15 is modified in execute stage
+    if (cpu->registers.r15 != original_pc) cpu->pipeline = 0;
+
+    return 1;
+}
+
+static inline int tick_cpu(void) {
+    Word instr = cpu->pipeline ? cpu->pipeline : fetch();
+    InstrType type;
+
+    switch ((type = decode(instr))) {
+    case ARM_BAD_INSTR:
+        fprintf(stderr, "[ARM] invalid opcode: #0x%08X\n", instr);
+        exit(1);
+    case THUMB_BAD_INSTR:
+        fprintf(stderr, "[THUMB] invalid opcode: #0x%04X\n", instr);
+        exit(1);
+    default: return execute(instr, type);
     }
 }
 
 void init_GBA(char *rom_file, char *bios_file) {
-    load_bios(bios_file);
-    load_rom(rom_file);
+    cpu = (CPU *)calloc(1, sizeof(CPU));
+    if (cpu == NULL) {
+        fprintf(stderr, "unable to allocate more memory!\n");
+        exit (1);
+    }
 
-    // initialize call stack
-    registers.r13_svc = 0x03007FE0;
-    registers.r13_irq = 0x03007FA0;
-    registers.r13 = 0x03007F00;
+    // initialize memory
+    cpu->mem = init_mem(bios_file, rom_file);
 
-    // initialize PC and CPU mode
-    registers.r15 = 0x08000000;
-    registers.cspr |= System;
+    // initialize stack
+    cpu->registers.r13_svc = 0x03007FE0;
+    cpu->registers.r13_irq = 0x03007FA0;
+    cpu->registers.r13 = 0x03007F00;
+
+    // initialize PC + default mode
+    cpu->registers.r14 = 0x08000000;
+    cpu->registers.r15 = 0x08000000;
+    cpu->registers.cpsr |= System;
 }
 
 uint16_t* compute_frame(void) {
     int total_cycles = 0;
     while (total_cycles < 280896) {
         int cycles = tick_cpu();
+        
         for (int j = 0; j < cycles; j++) {
             tick_ppu();
         }
