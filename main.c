@@ -61,14 +61,41 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    SDL_Event event; 
+    SDL_Event event;
+    
     bool running = true;
 
     while(running)
     {
+        uint16_t key_input = 0xFFFF;
+
         while(SDL_PollEvent(&event))
         {
             switch (event.type) {
+            case SDL_KEYDOWN:
+                switch (event.key.keysym.sym) {
+                case SDLK_RETURN:
+                    key_input = ~(1 << 3) & key_input;
+                    break;
+                case SDLK_BACKSPACE:
+                    key_input = ~(1 << 2) & key_input;
+                    break;
+
+                /* D-PAD */
+                case SDLK_RIGHT:
+                    key_input = ~(1 << 4) & key_input;
+                    break;
+                case SDLK_LEFT:
+                    key_input = ~(1 << 5) & key_input;
+                    break;
+                case SDLK_UP:
+                    key_input = ~(1 << 6) & key_input;
+                    break;
+                case SDLK_DOWN:
+                    key_input = ~(1 << 7) & key_input;
+                    break;
+                }
+                break;
             case SDL_QUIT:
                 running = false;
                 break;
@@ -76,7 +103,7 @@ int main(int argc, char **argv) {
         }
 
         // TODO: lock at ~60 FPS
-        sdl_render_frame(renderer, compute_frame());
+        sdl_render_frame(renderer, compute_frame(key_input));
     }
 
     SDL_DestroyWindow(window);

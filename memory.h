@@ -13,13 +13,12 @@ typedef struct {
     uint16_t reg_keyinput;
 } Memory;
 
-Memory* init_mem(char *bios_file, char *rom_file);
+Memory* init_mem(const char *bios_file, const char *rom_file);
 
-uint32_t read_word(Memory *mem, uint32_t addr);
-uint16_t read_half_word(Memory *mem, uint32_t addr);
+// read size of (1, 2, or 4) bytes from memory at given address
+uint32_t read_mem(Memory *mem, uint32_t addr, size_t size);
 
-void write_word(Memory *mem, uint32_t addr, uint32_t val);
-void write_half_word(Memory *mem, uint32_t addr, uint16_t val);
-void write_byte(Memory *mem, uint32_t addr, uint8_t val);
+// write size of (1, 2, or 4) bytes to memory at given address
+void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t size);
 
 #endif

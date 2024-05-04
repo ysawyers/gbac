@@ -2,12 +2,12 @@
 #include <stdlib.h>
 #include "ppu.h"
 
-#define DCNT_MODE (reg_dispcnt & 0x7)
-#define DCNT_GB ((reg_dispcnt >> 3) & 1)
-#define DCNT_PAGE ((reg_dispcnt >> 4) & 1)
+#define DCNT_MODE    (reg_dispcnt & 0x7)
+#define DCNT_GB      ((reg_dispcnt >> 3) & 1)
+#define DCNT_PAGE    ((reg_dispcnt >> 4) & 1)
 #define DCNT_OAM_HBL ((reg_dispcnt >> 5) & 1)
-#define DCNT_OBJ_1D ((reg_dispcnt >> 6) & 1)
-#define DCNT_BLANK ((reg_dispcnt >> 7) & 1)
+#define DCNT_OBJ_1D  ((reg_dispcnt >> 6) & 1)
+#define DCNT_BLANK   ((reg_dispcnt >> 7) & 1)
 
 #define DCNT_BG0 ((reg_dispcnt >> 0x8) & 1)
 #define DCNT_BG1 ((reg_dispcnt >> 0x9) & 1)
