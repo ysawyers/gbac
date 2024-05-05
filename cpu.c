@@ -190,6 +190,18 @@ char* register_to_cstr(uint8_t reg_id) {
     return "";
 }
 
+char* processor_mode_to_cstr(Mode mode) {
+    switch (mode) {
+    case User:
+    case System: return "fc";
+    case Supervisor: return "svc";
+    case FIQ: return "fiq";
+    case IRQ: return "irq";
+    case Abort: return "abt";
+    case Undefined: return "und";
+    }
+}
+
 void print_dump(void) {
     printf("\n\n==== DUMP ====\n");
     for (int i = 0; i < 16; i++) {
@@ -528,6 +540,8 @@ static inline InstrType decode(Word instr) {
     }
 }
 
+int poop = 1;
+
 static inline Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift) {
     if (!shift) // LSR#0, ASR#0, ROR#0 converted to LSL#0
         shift_type = SHIFT_TYPE_LSL;
@@ -694,7 +708,6 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             Bit i = (instr >> 25) & 1;
             Bit s = (instr >> 20) & 1;
 
-            uint8_t opcode = (instr >> 21) & 0xF;
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
@@ -728,7 +741,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
 
             Word rn_val = get_reg(rn) + rn_r15_offset;
 
-            switch (opcode) {
+            switch ((instr >> 21) & 0xF) {
             case 0x0: {
                 DEBUG_PRINT(("AND%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
                 Word result = get_reg(rn) & operand2;
@@ -778,6 +791,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 set_reg(rd, unsigned_result);
                 break;
             case 0x7:
+                
                 break;
             case 0x8: {
                 DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
@@ -799,21 +813,30 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             }
             case 0xB: {
                 DEBUG_PRINT(("CMN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                
+
+                
                 break;
             }
-            case 0xC:
+            case 0xC: {
                 DEBUG_PRINT(("ORR%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
                 Word result = get_reg(rn) | operand2;
                 if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
                 set_reg(rd, result);           
                 break;
+            }
             case 0xD:
                 DEBUG_PRINT(("MOV%s%s %s, #0x%X\n", cond_to_cstr(cond), s ? "S" : "", register_to_cstr(rd), operand2))
                 if (s) set_cc(operand2 >> 31, operand2 == 0, cpu->shifter_carry, CC_UNMOD);
                 set_reg(rd, operand2);
                 break;
-            case 0xE:
+            case 0xE: {
+                DEBUG_PRINT(("BIC%s%s %s, %s, #0x%X", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rn), operand2))
+                Word result = rn_val & ~operand2;
+                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+                set_reg(rd, result);
                 break;
+            }
             case 0xF: {
                 DEBUG_PRINT(("MVN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), operand2))
                 Word result = ~operand2;
@@ -821,9 +844,6 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 set_reg(rd, result);
                 break;
             }
-            default:
-                fprintf(stderr, "ALU instruction not implemented: 0x%01X\n", opcode);
-                exit(1);
             }
             break;
         }
@@ -837,17 +857,19 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
-            int32_t offset = i ? ((((instr >> 8) & 0xF) << 4) | (instr & 0xF)) : get_reg(instr & 0xF);
+            int32_t offset = i ? 
+                ((((instr >> 8) & 0xF) << 4) | (instr & 0xF)) : 
+                get_reg(instr & 0xF);
             if (!u) offset = -offset;
 
-            uint32_t address = get_reg(rn) + offset;
+            Word addr = get_reg(rn) + offset;
 
             if (l) {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
                     DEBUG_PRINT(("LDR%sH ", cond_to_cstr(cond)))
                     if (p) {
-                        set_reg(rd, read_mem(cpu->mem, address, HALF_WORD_SIZE));
+                        set_reg(rd, read_mem(cpu->mem, addr, HALF_WORD_SIZE));
                     } else {
                         set_reg(rd, read_mem(cpu->mem, get_reg(rn), HALF_WORD_SIZE));
                     }
@@ -863,7 +885,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
                     if (p) {
-                        write_mem(cpu->mem, address, get_reg(rd), HALF_WORD_SIZE);
+                        write_mem(cpu->mem, addr, get_reg(rd), HALF_WORD_SIZE);
                     } else {
                         write_mem(cpu->mem, get_reg(rn), get_reg(rd), HALF_WORD_SIZE);
                     }
@@ -879,7 +901,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             }
 
             // post indexing implies writeback
-            if ((p && w) || !p) set_reg(rn, address);
+            if ((p && w) || !p) set_reg(rn, addr);
 
             DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
             if (p) {
@@ -911,10 +933,10 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             break;
         }
         case SingleDataTransfer: {
-            Bit i = (instr >> 25) & 1;
-            Bit p = (instr >> 24) & 1;
-            Bit u = (instr >> 23) & 1;
-            Bit b = (instr >> 22) & 1;
+            Bit i = (instr >> 25) & 1; 
+            Bit p = (instr >> 24) & 1; // if set pre-index (apply offset before memory acess)
+            Bit u = (instr >> 23) & 1; // if set operand is unsigned
+            Bit b = (instr >> 22) & 1; // if set byte transfers are enabled otherwise word
             Bit t = (instr >> 21) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
@@ -926,12 +948,10 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             Word operand_2 = i ? 
                 barrel_shifter((instr >> 5) & 0x3, get_reg(instr & 0xF), (instr >> 7) & 0x1F) : 
                 instr & 0xFFF;
-
-            if (!u)
-                operand_2 = ~operand_2 + 1;
+            if (!u) operand_2 = ~operand_2 + 1;
 
             Word addr = get_reg(rn) + operand_2;
-            bool write_back = !p || (p && t);
+            bool should_write_back = !p || (p && t);
 
             if (rd == 0xF) {
                 printf("POOP ON A STICK!\n");
@@ -957,11 +977,11 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 break;
             }
 
-            if (write_back) set_reg(rn, addr);
+            if (should_write_back) set_reg(rn, addr);
 
             DEBUG_PRINT(("%s, [%s", register_to_cstr(rd), register_to_cstr(rn)))
             if (p) {
-                DEBUG_PRINT((", #0x%X]%s", operand_2, write_back ? "!" : ""))
+                DEBUG_PRINT((", #0x%X]%s", operand_2, should_write_back ? "!" : ""))
             } else {
                 DEBUG_PRINT(("], #0x%X", operand_2))
             }
@@ -970,27 +990,19 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
         }
         case SoftwareInterrupt:
             DEBUG_PRINT(("SWI%s #%X\n", cond_to_cstr(cond), instr & 0xFFFFFF))
-            cpu->registers.r14_svc = cpu->registers.r15 - 4;
+            cpu->registers.r14_svc = cpu->registers.r15 - 4; // LR set to the instruction following SWI (PC + 4) (note: r15 always PC + 8)
             cpu->registers.spsr_svc = cpu->registers.cpsr;
             SET_PROCESSOR_MODE(Supervisor)
             cpu->registers.r15 = 0x00000008;
             break;
-        case Multiply: {
-            uint8_t opcode = (instr >> 21) & 0xF;
-
-            Bit s = (instr >> 20) & 1; // Must be 0 for Halfword & UMAAL
-
+        case Multiply: { // NOTE: no halfword multiply instructions for GBA
+            Bit s = (instr >> 20) & 1;
             uint8_t rd = (instr >> 16) & 0xF;
             uint8_t rn = (instr >> 12) & 0xF;
             uint8_t rs = (instr >> 8) & 0xF;
             uint8_t rm = instr & 0xF;
 
-            if (((instr >> 4) & 0xF) != 0x9) {
-                printf("HALF WORD MULTIPLY\n");
-                exit(1);
-            }
-
-            switch (opcode) {
+            switch ((instr >> 21) & 0xF) {
             case 0x0: {
                 DEBUG_PRINT(("MUL%s%s %s, %s, %s\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
                 Word result = get_reg(rm) * get_reg(rs);
@@ -1006,7 +1018,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 break;
             }
             case 0x2:
-                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
+                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", (instr >> 21) & 0xF);
                 exit(1);
                 break;
             case 0x4: {
@@ -1018,8 +1030,11 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 break;
             }
             case 0x5:
-                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
-                exit(1);
+                DEBUG_PRINT(("UMLAL%s%s %s, %s, %s, %s\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rn), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
+                uint64_t result = (uint64_t)get_reg(rm) * (uint64_t)get_reg(rs) + (((uint64_t)get_reg(rd) << (uint64_t)32) | (uint64_t)get_reg(rn));
+                if (s) set_cc(result >> 63, result == 0, CC_UNMOD, CC_UNMOD);
+                set_reg(rn, result & ~0U);
+                set_reg(rd, (result >> 32) & ~0U);
                 break;
             case 0x6: {
                 DEBUG_PRINT(("SMULL%s%s %s, %s, %s, %s\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rn), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
@@ -1029,12 +1044,16 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 set_reg(rd, (result >> 32) & ~0U);
                 break;
             }
-            case 0x7:
-                fprintf(stderr, "multiply opcode not implemented yet: %04X\n", opcode);
-                exit(1);
+            case 0x7: {
+                DEBUG_PRINT(("SMLAL%s%s %s, %s, %s, %s\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rn), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
+                int64_t result = (int64_t)(int32_t)get_reg(rm) * (int64_t)(int32_t)get_reg(rs) + ((int64_t)((uint64_t)get_reg(rd) << (uint64_t)32) | (int64_t)get_reg(rn));
+                if (s) set_cc(result >> 63, result == 0, CC_UNMOD, CC_UNMOD);
+                set_reg(rn, result & ~0U);
+                set_reg(rd, (result >> 32) & ~0U);
                 break;
+            }
             default:
-                fprintf(stderr, "unexpected opcode for MUL/MLA");
+                fprintf(stderr, "CPU Error: invalid opcode\n");
                 exit(1);
             }
             break;
@@ -1044,22 +1063,21 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
 
             Bit i = (instr >> 25) & 1;
             Bit psr = (instr >> 22) & 1;
-
-            Bit f = (instr >> 19) & 1;
-            Bit c = (instr >> 16) & 1;
+            Bit f = (instr >> 19) & 1; // if set, modify psr cc flag bits
+            Bit c = (instr >> 16) & 1; // if set, modify psr control (processor mode) bits
 
             Word operand = i ?
                 barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr >> 8) & 0xF) * 2) :
                 get_reg(instr & 0xF);
 
             if (psr) {
-                DEBUG_PRINT(("spsr_<mode>, "))
-                if (f) set_psr_reg((0x00FFFFFF & get_psr_reg()) | (operand & 0xFF000000));
-                if (c) set_psr_reg((0xFFFFFF00 & get_psr_reg()) | (operand & 0x000000FF));
+                DEBUG_PRINT(("spsr_%s, ", processor_mode_to_cstr(PROCESSOR_MODE)))
+                set_psr_reg((get_psr_reg() & 0x00FFFFFF) | (operand & 0xFF000000));
+                set_psr_reg((get_psr_reg() & 0xFFFFFF00) | (operand & 0x000000FF));
             } else {
-                DEBUG_PRINT(("cpsr_fc, "))
-                if (f) cpu->registers.cpsr = (0x00FFFFFF & cpu->registers.cpsr) | (operand & 0xFF000000);
-                if (c) cpu->registers.cpsr = (0xFFFFFF00 & cpu->registers.cpsr) | (operand & 0x000000FF);
+                DEBUG_PRINT(("cpsr, "))
+                cpu->registers.cpsr = (cpu->registers.cpsr & 0x00FFFFFF) | (operand & 0xFF000000);
+                cpu->registers.cpsr = (cpu->registers.cpsr & 0xFFFFFF00) | (operand & 0x000000FF);
             }
 
             if (i) { DEBUG_PRINT(("#0x%X\n", operand)) } else { DEBUG_PRINT(("%s\n", register_to_cstr(instr & 0xF))) }
@@ -1068,22 +1086,22 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
         case MRS: {
             DEBUG_PRINT(("MRS%s ", cond_to_cstr(instr)))
 
-            if (((instr >> 16) & 0xF) != 0xF) {
-                printf("FUCK THIS SHOULD BE SWP!\n");
-                exit(1);
-            }
-
             Bit psr = (instr >> 22) & 1;
-
             uint8_t rd = (instr >> 12) & 0xF;
 
             if (psr) {
-                DEBUG_PRINT(("spsr_<mode>\n"))
+                DEBUG_PRINT(("%s, spsr_%s\n", register_to_cstr(rd), processor_mode_to_cstr(PROCESSOR_MODE)))
                 set_reg(rd, get_psr_reg());
             } else {
-                DEBUG_PRINT(("cpsr_fc\n"))
-                exit(1);
+                DEBUG_PRINT(("%s, cpsr\n", register_to_cstr(rd)))
+                set_reg(rd, cpu->registers.cpsr);
             }
+
+            break;
+        }
+        case SingleDataSwap: {
+            printf("SWP INSTRUCTION AT PC: %08X\n", cpu->registers.r15);
+            exit(1);
             break;
         }
         default:
@@ -1554,7 +1572,6 @@ uint16_t* compute_frame(uint16_t key_input) {
     int total_cycles = 0;
     while (total_cycles < 280896) {
         int cycles = tick_cpu();
-        
         for (int j = 0; j < cycles; j++) {
             tick_ppu();
         }

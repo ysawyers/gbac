@@ -51,7 +51,11 @@ Memory* init_mem(const char *bios_file, const char *rom_file) {
 uint32_t read_mem(Memory *mem, uint32_t addr, size_t size) {
     uint32_t word = 0;
 
-    if (addr >= 0x03000000 && addr <= 0x03FFFFFF) {
+    if (addr <= 0x00003FFF) {
+        memcpy(&word, mem->bios + addr, size);
+    } else if (addr >= 0x02000000 && addr <= 0x02FFFFFF) {
+        memcpy(&word, mem->external_wram + ((addr - 0x02000000) % 0x40000), size);
+    } else if (addr >= 0x03000000 && addr <= 0x03FFFFFF) {
         memcpy(&word, mem->internal_wram + ((addr - 0x03000000) % 0x8000), size);
     } else if (addr >= 0x04000000 && addr <= 0x04000054) {
         return ppu_read_register(addr);

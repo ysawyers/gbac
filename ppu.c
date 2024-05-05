@@ -1,6 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "ppu.h"
+
+#define FRAME_WIDTH  240
+#define FRAME_HEIGHT 160
+
+#define WHITE_PIXEL 0xFFFF
 
 #define DCNT_MODE    (reg_dispcnt & 0x7)
 #define DCNT_GB      ((reg_dispcnt >> 3) & 1)
@@ -15,7 +21,12 @@
 #define DCNT_BG3 ((reg_dispcnt >> 0xB) & 1)
 #define DCNT_OBJ ((reg_dispcnt >> 0xC) & 1)
 
-uint16_t frame[160][240];
+#define CYCLES_PER_SCANLINE 1232
+#define CYCLES_PER_HDRAW    1006
+
+typedef uint16_t Pixel;
+
+Pixel frame[FRAME_HEIGHT][FRAME_WIDTH];
 
 uint8_t vram[0x18000];
 uint8_t oam[0x400];
@@ -68,68 +79,64 @@ uint16_t reg_bldy;
 
 uint8_t reg_vcount = 0; // LCY
 
-// reset at the beginning of each scanline
 size_t cycles = 0;
 
-void render_scanline(void) {
-    // forced vblank displays all white
+static inline void render_scanline(void) {
     if (DCNT_BLANK) {
-        for (int i = 0; i < 240; i++) frame[reg_vcount][i] = 0xFFFF;
+        for (int row = 0; row < FRAME_WIDTH; row++) frame[reg_vcount][row] = WHITE_PIXEL;
         return;
     }
 
     // check if any rendering enable bits are set
     if ((reg_dispcnt >> 8) & 0x1F) {
         switch (DCNT_MODE) {
-        // tilemap
-        case 0:
-        case 1:
-        case 2:
+        // tilemap modes
+        case 0x0:
+        case 0x1:
+        case 0x2:
             fprintf(stderr, "video mode: %d not implemented yet\n", DCNT_MODE);
             exit(1);
 
-        // bitmap
-        case 3: // 240x160 2bpp directly in vram
-            if (DCNT_BG2) {
-                for (int i = 0; i < 240; i++) {
-                    frame[reg_vcount][i] = *(uint16_t *)(vram + (reg_vcount * (240 * 2)) + (i * 2));
-                }
-            }
+        // bitmap modes
+        case 0x3:
+            if (DCNT_BG2)
+                for (int row = 0; row < FRAME_WIDTH; row++) // pixels for the frame are stored directly in vram
+                    memcpy(&frame[reg_vcount][row], vram + (reg_vcount * (FRAME_WIDTH * sizeof(Pixel))) + (row * sizeof(Pixel)), sizeof(Pixel));
             break;
-        case 4: // 240x160 1bpp from vram as pallete index
-            if (DCNT_BG2) {
-                for (int i = 0; i < 240; i++) {
-                    uint8_t pallete_idx = *(uint8_t *)(vram + (reg_vcount * 240) + i);
-                    frame[reg_vcount][i] = *(uint16_t *)(pallete_ram + pallete_idx);
+        case 0x4:
+            if (DCNT_BG2)
+                for (int row = 0; row < FRAME_WIDTH; row++) {
+                    // each byte in vram is interpreted as a pallete index holding a pixels color
+                    uint8_t pallete_idx = *(vram + (reg_vcount * FRAME_WIDTH) + row);
+                    // copy the 15bpp color to the associated pixel on the frame
+                    memcpy(&frame[reg_vcount][row], &pallete_ram[pallete_idx * sizeof(Pixel)], sizeof(Pixel));
                 }
-            }
             break;
-        case 5:
+        case 0x5:
             fprintf(stderr, "bitmap mode 5 not implemented yet\n");
             exit(1);
+
         default:
-            fprintf(stderr, "video mode [%d]: unexpected!\n", DCNT_MODE);
+            fprintf(stderr, "PPU Error: invalid video mode\n", DCNT_MODE);
             exit(1);
         }
-    } else { // all render bits disabled, draw backdrop (first entry in pallete RAM)
-        for (int i = 0; i < 240; i++) {
-            frame[reg_vcount][i] = *(uint16_t *)pallete_ram;
-        }
+    } else {
+        for (int i = 0; i < 240; i++) // no rendering bits enabled: render backdrop (first entry in pallete RAM)
+            memcpy(&frame[reg_vcount][i], pallete_ram, sizeof(Pixel));
     }
 }
 
 void tick_ppu(void) {
     cycles += 1;
 
-    // vblank
-    if (reg_vcount >= 160) {
+    // VBlank mode starts for the last "68 scanlines"
+    if (reg_vcount >= FRAME_HEIGHT) {
         reg_dispstat |= 0x0001;
 
-        if (cycles % 1232 == 0) {
-            reg_vcount += 1;
-            if (reg_vcount == 228) {
-                // NOTE: may be bad?
-                reg_dispstat &= 0xFFFE;
+        if ((cycles % CYCLES_PER_SCANLINE) == 0) {
+            // check if frame is fully rendered
+            if (++reg_vcount == 228) {
+                reg_dispstat &= 0xFFFE; // VBlank has ended and VDraw will start for the next frame
                 reg_vcount = 0;
                 cycles = 0;
             };
@@ -137,19 +144,15 @@ void tick_ppu(void) {
         return;
     }
 
-    // vdraw
-    if (cycles <= 1006) reg_dispstat = reg_dispstat & 0xFFFE;
+    // from "research" seems like rendering 32 cycles into H-draw 
+    // creates best results for scanline PPU
+    if (cycles == 32) 
+        render_scanline();
 
-    // from "research" seems like rendering 32 cycles into H-draw creates best results for scanline PPU
-    if (cycles == 32) render_scanline();
-
-    // hblank
-    if (cycles > 1006) {};
-
-    // end of scanline
-    if (cycles == 1232) {
-        cycles = 0;
-        reg_vcount += 1;
+    if (cycles == CYCLES_PER_SCANLINE) {
+        reg_dispstat &= 0xFFFE; // HBlank has ended and VDraw resumes
+        cycles = 0;             // reset every 1232 cycles during VDraw
+        reg_vcount += 1;        // increment to render next scanline
     }
 };
 

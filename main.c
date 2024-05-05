@@ -6,29 +6,30 @@
 
 #define SCREEN_HEIGHT 160
 #define SCREEN_WIDTH  240
+#define PIXEL_SIZE 3
 
 #define RGB_VALUE(n) (((n) << 3) | ((n) >> 2))
 
 void sdl_render_frame(SDL_Renderer *renderer, uint16_t *frame) {
-    SDL_Rect scanline_pixels[SCREEN_WIDTH * SCREEN_HEIGHT];
+    SDL_RenderClear(renderer); // clear the previous frame
 
-    SDL_RenderClear(renderer);
+    SDL_Rect lcd[SCREEN_WIDTH * SCREEN_HEIGHT];
 
     for (int i = 0; i < SCREEN_HEIGHT; i++) {
         for (int j = 0; j < SCREEN_WIDTH; j++) {
-            scanline_pixels[(i * 240) + j].w = 2;
-            scanline_pixels[(i * 240) + j].h = 2;
-            scanline_pixels[(i * 240) + j].x = j * 2;
-            scanline_pixels[(i * 240) + j].y = i * 2;
+            lcd[(i * 240) + j].w = PIXEL_SIZE;
+            lcd[(i * 240) + j].h = PIXEL_SIZE;
+            lcd[(i * 240) + j].x = j * PIXEL_SIZE;
+            lcd[(i * 240) + j].y = i * PIXEL_SIZE;
         }
     }
 
     for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
         SDL_SetRenderDrawColor(renderer, RGB_VALUE(frame[i] & 0x1F), RGB_VALUE((frame[i] >> 5) & 0x1F), RGB_VALUE(((frame[i] >> 10) & 0x1F)), 255);
-        SDL_RenderFillRect(renderer, &scanline_pixels[i]);
+        SDL_RenderFillRect(renderer, &lcd[i]);
     }
 
-    SDL_RenderPresent(renderer);
+    SDL_RenderPresent(renderer); // render the new frame
 }
 
 int main(int argc, char **argv) {
@@ -47,7 +48,7 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    window = SDL_CreateWindow("gbac", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2, SDL_WINDOW_SHOWN);
+    window = SDL_CreateWindow("gbac", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH * PIXEL_SIZE, SCREEN_HEIGHT * PIXEL_SIZE, SDL_WINDOW_SHOWN);
     if(window == NULL) {
         printf( "SDL_CreateWindow Error: %s\n", SDL_GetError());
         exit(1);
@@ -74,14 +75,18 @@ int main(int argc, char **argv) {
             switch (event.type) {
             case SDL_KEYDOWN:
                 switch (event.key.keysym.sym) {
-                case SDLK_RETURN:
+                case SDLK_q: // A
+                    key_input = ~1 & key_input;
+                    break;
+                case SDLK_w: // B
+                    key_input = ~(1 << 1) & key_input;
+                    break;
+                case SDLK_RETURN: // START
                     key_input = ~(1 << 3) & key_input;
                     break;
-                case SDLK_BACKSPACE:
+                case SDLK_BACKSPACE: // SELECT
                     key_input = ~(1 << 2) & key_input;
                     break;
-
-                /* D-PAD */
                 case SDLK_RIGHT:
                     key_input = ~(1 << 4) & key_input;
                     break;
@@ -102,7 +107,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        // TODO: lock at ~60 FPS
+        // TODO: cap at 60 FPS
         sdl_render_frame(renderer, compute_frame(key_input));
     }
 
