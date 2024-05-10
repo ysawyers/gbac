@@ -130,7 +130,7 @@ typedef struct {
 typedef struct {
     RegisterSet registers;
     Word pipeline;
-    Bit shifter_carry;
+    uint8_t shifter_carry;
 
     Memory *mem;
 } CPU;
@@ -456,10 +456,13 @@ static inline InstrType decode(Word instr) {
                 return THUMB_8;
             return THUMB_7;
         case 0x3: return THUMB_9;
+        case 0x4:
+            if ((instr >> 12) & 1) 
+                return THUMB_11;
+            return THUMB_10;
         case 0x5:
             if (((instr >> 12) & 1) == 0) 
                 return THUMB_12;
-            
             if (((instr >> 9) & 0x3) == 0x2)
                 return THUMB_14;
             return THUMB_13;
@@ -540,15 +543,13 @@ static inline InstrType decode(Word instr) {
     }
 }
 
-int poop = 1;
-
 static inline Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift) {
     if (!shift) // LSR#0, ASR#0, ROR#0 converted to LSL#0
         shift_type = SHIFT_TYPE_LSL;
 
     switch (shift_type) {
     case SHIFT_TYPE_LSL:
-        if (!shift) { // LSL#0: carry unmodified as well as operand_2
+        if (!shift) { // LSL#0: carry unmodified as well as operand
             cpu->shifter_carry = CC_UNMOD;
             break;
         }
@@ -560,11 +561,11 @@ static inline Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t s
             printf("LSR shift > 31\n");
             exit(1);
         }
-        cpu->shifter_carry = ((int32_t)operand_2 >> (shift - 1)) & 1;
-        operand_2 = (int32_t)operand_2 >> shift;
+        cpu->shifter_carry = (operand_2 >> (shift - 1)) & 1;
+        operand_2 >>= shift;
         break;
     case SHIFT_TYPE_ASR:
-        if (shift > 31) { // both Op2 and C are filled by msb (bit 31)
+        if (shift > 31) { // ASR#32: operand and C are filled by Bit 31 of Rm
             Bit msb = (operand_2 >> 31) & 1;
             cpu->shifter_carry = msb;
             operand_2 = msb ? ~0U : 0;
@@ -578,7 +579,7 @@ static inline Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t s
             printf("ROR shift > 31\n");
             exit(1);
         }
-        operand_2 = (operand_2 >> (shift % 32)) | (operand_2 << (32 - (shift % 32)));
+        operand_2 = (operand_2 >> shift) | (operand_2 << (32 - shift));
         cpu->shifter_carry = operand_2 >> 31;
         break;
     }
@@ -608,28 +609,22 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             switch (opcode) {
             case 0x1:
                 DEBUG_PRINT(("BX%s %s\n", cond_to_cstr(cond), register_to_cstr(rn)))
-                if (rn == 0xF) {
-                    printf("r15 BX edge case\n");
-                    exit(1);
-                }
-                
-                if (rn_val & 1) // switch mode to THUMB
+                if (rn_val & 1) {
+                    // change mode to THUMB 
                     cpu->registers.cpsr |= 0x20;
-                
-                // masked bit 0 for alignment
-                cpu->registers.r15 = rn_val & ~1U; 
-
-                break;
-            case 0x2:
-                DEBUG_PRINT(("BXJ"))
-                exit(1);
+                    // align to 16-bit THUMB instructions
+                    cpu->registers.r15 = rn_val & ~0x1; 
+                } else {
+                    // continue in ARM so align to 32-bit ARM instructions
+                    cpu->registers.r15 = rn_val & ~0x3; 
+                }
                 break;
             case 0x3:
                 DEBUG_PRINT(("BLX"))
                 exit(1);
                 break;
             default:
-                fprintf(stderr, "BX invalid opcode\n");
+                fprintf(stderr, "CPU Error: invalid BX opcode!\n");
                 exit(1);
             }
             break;
@@ -711,13 +706,15 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
-            if (rd == 0xF && s == 1) {
-                printf("VERY SPECIAL ALU CASE\n");
+            if (rd == 0xF && s) {
+                printf("THE P OPCODES!\n");
                 exit(1);
             }
 
             Word operand2;
-            Word rn_r15_offset = 0; // PC + 12 when rn = r15, i = 0, r = 1 otherwise PC + 8 (which in this case is whats stored in cpu->registers.r15)
+
+            // will be set to 4 if rn = r15 because returned value should be PC + 12 (r15 holds PC + 8)
+            Word rn_r15_offset = 0;
 
             if (i) {
                 operand2 = barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr & 0xF00) >> 8) * 2);
@@ -728,7 +725,8 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 uint8_t rm = instr & 0xF;
 
                 if (r) {
-                    Word rm_r15_offset = 0; // PC + 12 when rm = r15, i = 0, r = 1 otherwise PC + 8 (which in this case is whats stored in cpu->registers.r15)
+                    // will be set to 4 if rm = r15 because returned value should be PC + 12 (r15 holds PC + 8)
+                    Word rm_r15_offset = 0;
                     if (rn == 0xF) rn_r15_offset = 4;
                     if (rm == 0xF) rm_r15_offset = 4;
 
@@ -744,92 +742,109 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             switch ((instr >> 21) & 0xF) {
             case 0x0: {
                 DEBUG_PRINT(("AND%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = get_reg(rn) & operand2;
+                Word result = rn_val & operand2;
                 if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
                 set_reg(rd, result);
                 break;
             }
             case 0x1: {
                 DEBUG_PRINT(("EOR%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = get_reg(rn) ^ operand2;
+                Word result = rn_val ^ operand2;
                 if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
                 set_reg(rd, result);
                 break;
             }
             case 0x2: {
                 DEBUG_PRINT(("SUB%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = rn_val - operand2;
-                set_cc(result >> 31, result == 0, rn_val >= operand2, CC_UNMOD); // TODO: FIX V FLAG
-                set_reg(rd, result);
+                uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1);
+                int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1);
+                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                set_reg(rd, unsigned_result);
                 break;
             }
             case 0x3: {
                 DEBUG_PRINT(("RSB%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+
+                printf("RSB: %08X\n", cpu->registers.r15);
+                print_dump();
                 exit(1);
+
                 break;
             }
             case 0x4: {
                 DEBUG_PRINT(("ADD%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                Word result = get_reg(rn) + operand2;
-                set_reg(rd, result);
-                if (s) set_cc(result >> 31, result == 0, result > UINT32_MAX, CC_UNMOD); // TODO: FIX V FLAG
+                uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2;
+                int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2;
+                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                set_reg(rd, unsigned_result);
                 break;
             }
             case 0x5: {
                 DEBUG_PRINT(("ADC%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)get_reg(rn) + ((uint64_t)operand2) + (uint64_t)get_cc(C);
-                int64_t signed_result = (int64_t)get_reg(rn) + ((int64_t)(int32_t)operand2) + (int64_t)get_cc(C);
-                if (s) set_cc(signed_result >> 63, unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                set_reg(rd, unsigned_result);
+                
+                printf("ADC: %08X\n", cpu->registers.r15);
+                print_dump();
+                exit(1);
+
                 break;
             }
-            case 0x6:
+            case 0x6: {
                 DEBUG_PRINT(("SBC%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = get_reg(rn) + ((uint64_t)~operand2 + 1) + ((uint64_t)~get_cc(C) + 1);
-                int64_t signed_result = get_reg(rn) + ((int64_t)(int32_t)~operand2 + 1) + ((int64_t)(int32_t)~get_cc(C) + 1);
-                if (s) set_cc(signed_result >> 63, unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                set_reg(rd, unsigned_result);
+
+                printf("SBC: %08X\n", cpu->registers.r15);
+                print_dump();
+                exit(1);
+
                 break;
-            case 0x7:
-                
+            }
+            case 0x7: {
+                DEBUG_PRINT(("RSC%s%s %s, %s, #0x%X\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rn), operand2))
+
+                printf("RSC: %08X\n", cpu->registers.r15);
+                print_dump();
+                exit(1);
+
                 break;
+            }
             case 0x8: {
                 DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = get_reg(rn) & operand2;
+                Word result = rn_val & operand2;
                 set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
                 break;
             }
             case 0x9: {
                 DEBUG_PRINT(("TEQ%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = get_reg(rn) ^ operand2;
+                Word result = rn_val ^ operand2;
                 set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
                 break;
             }
             case 0xA: {
                 DEBUG_PRINT(("CMP%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = rn_val - operand2;
-                set_cc(result >> 31, result == 0, rn_val >= operand2, CC_UNMOD); // TODO: FIX V FLAG
+                uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1);
+                int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1);
+                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 break;
             }
             case 0xB: {
                 DEBUG_PRINT(("CMN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                
-
-                
+                uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2;
+                int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2;
+                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 break;
             }
             case 0xC: {
                 DEBUG_PRINT(("ORR%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                Word result = get_reg(rn) | operand2;
+                Word result = rn_val | operand2;
                 if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, result);           
+                set_reg(rd, result);
                 break;
             }
-            case 0xD:
+            case 0xD: {
                 DEBUG_PRINT(("MOV%s%s %s, #0x%X\n", cond_to_cstr(cond), s ? "S" : "", register_to_cstr(rd), operand2))
                 if (s) set_cc(operand2 >> 31, operand2 == 0, cpu->shifter_carry, CC_UNMOD);
                 set_reg(rd, operand2);
                 break;
+            }
             case 0xE: {
                 DEBUG_PRINT(("BIC%s%s %s, %s, #0x%X", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rn), operand2))
                 Word result = rn_val & ~operand2;
@@ -838,10 +853,10 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 break;
             }
             case 0xF: {
-                DEBUG_PRINT(("MVN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), operand2))
-                Word result = ~operand2;
-                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, result);
+                DEBUG_PRINT(("MVN%s%s %s, #0x%X\n", cond_to_cstr(cond), s ? "S" : "", register_to_cstr(rd), operand2))
+                operand2 = ~operand2;
+                if (s) set_cc(operand2 >> 31, operand2 == 0, cpu->shifter_carry, CC_UNMOD);
+                set_reg(rd, operand2);
                 break;
             }
             }
@@ -863,45 +878,41 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             if (!u) offset = -offset;
 
             Word addr = get_reg(rn) + offset;
+            bool should_write_back = (p && w) || !p;
 
             if (l) {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
                     DEBUG_PRINT(("LDR%sH ", cond_to_cstr(cond)))
-                    if (p) {
-                        set_reg(rd, read_mem(cpu->mem, addr, HALF_WORD_SIZE));
-                    } else {
-                        set_reg(rd, read_mem(cpu->mem, get_reg(rn), HALF_WORD_SIZE));
-                    }
+                    set_reg(rd, read_mem(cpu->mem, addr - (p ? 0 : offset), HALF_WORD_SIZE));
                     break;
                 case 2:
                     DEBUG_PRINT(("LDR%sSB ", cond_to_cstr(cond)))
+                    exit(1);
                     break;
                 case 3:
                     DEBUG_PRINT(("LDR%sSH ", cond_to_cstr(cond)))
+                    exit(1);
                     break;
                 }
             } else {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
-                    if (p) {
-                        write_mem(cpu->mem, addr, get_reg(rd), HALF_WORD_SIZE);
-                    } else {
-                        write_mem(cpu->mem, get_reg(rn), get_reg(rd), HALF_WORD_SIZE);
-                    }
                     DEBUG_PRINT(("STR%sH ", cond_to_cstr(cond)))
+                    write_mem(cpu->mem, addr - (p ? 0 : offset), get_reg(rd), HALF_WORD_SIZE);
                     break;
                 case 2:
                     DEBUG_PRINT(("LDR%sD ", cond_to_cstr(cond)))
+                    exit(1);
                     break;
                 case 3:
                     DEBUG_PRINT(("STR%sD ", cond_to_cstr(cond)))
+                    exit(1);
                     break;
                 }
             }
 
-            // post indexing implies writeback
-            if ((p && w) || !p) set_reg(rn, addr);
+            if (should_write_back) set_reg(rn, addr);
 
             DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
             if (p) {
@@ -950,7 +961,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 instr & 0xFFF;
             if (!u) operand_2 = ~operand_2 + 1;
 
-            Word addr = get_reg(rn) + operand_2;
+            Word addr = get_reg(rn) + operand_2; // base address with offset applied
             bool should_write_back = !p || (p && t);
 
             if (rd == 0xF) {
@@ -961,19 +972,11 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             switch ((instr >> 20) & 1) {
             case 0:
                 DEBUG_PRINT(("STR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t ? "T" : ""))
-                if (p) {
-                    if (b) { write_mem(cpu->mem, addr, get_reg(rd), BYTE_SIZE); } else { write_mem(cpu->mem, addr, get_reg(rd), WORD_SIZE); }
-                } else {
-                    if (b) { write_mem(cpu->mem, get_reg(rn), get_reg(rd), BYTE_SIZE); } else { write_mem(cpu->mem, get_reg(rn), get_reg(rd), WORD_SIZE); }
-                }
+                write_mem(cpu->mem, addr - (p ? 0 : operand_2), get_reg(rd), b ? BYTE_SIZE : WORD_SIZE);
                 break;
             case 1:
                 DEBUG_PRINT(("LDR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t ? "T" : ""))
-                if (p) {
-                    if (b) { set_reg(rd, read_mem(cpu->mem, addr, BYTE_SIZE)); } else { set_reg(rd, read_mem(cpu->mem, addr, WORD_SIZE)); }
-                } else {
-                    if (b) { set_reg(rd, read_mem(cpu->mem, get_reg(rn), BYTE_SIZE)); } else { set_reg(rd, read_mem(cpu->mem, get_reg(rn), WORD_SIZE)); }
-                }
+                set_reg(rd, read_mem(cpu->mem, addr - (p ? 0 : operand_2), b ? BYTE_SIZE : WORD_SIZE));
                 break;
             }
 
@@ -1100,8 +1103,15 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             break;
         }
         case SingleDataSwap: {
-            printf("SWP INSTRUCTION AT PC: %08X\n", cpu->registers.r15);
-            exit(1);
+            Bit b = (instr >> 22) & 1; // if set, transfer byte otherwise word
+            uint8_t rn = (instr >> 16) & 0xF; // r0-r14
+            uint8_t rd = (instr >> 12) & 0xF; // r0-r14
+            uint8_t rm = instr & 0xF; // r0-r14
+
+            set_reg(rd, read_mem(cpu->mem, get_reg(rn), b ? BYTE_SIZE : WORD_SIZE)); // Rd=[Rn]
+            write_mem(cpu->mem, get_reg(rn), get_reg(rm), b ? BYTE_SIZE : WORD_SIZE); // [Rn]=Rm
+
+            DEBUG_PRINT(("SWP%s%s %s, %s, [%s]", cond_to_cstr(instr), b ? "B" : "", register_to_cstr(rd)))
             break;
         }
         default:
@@ -1130,15 +1140,16 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
 
         switch (opcode) {
         case 0x0:
-            DEBUG_PRINT(("LSLS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
+            DEBUG_PRINT(("LSLS "))
             break;
         case 0x1:
-            DEBUG_PRINT(("LSRS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
+            DEBUG_PRINT(("LSRS "))
             break;
         case 0x2:
-            DEBUG_PRINT(("ASRS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
+            DEBUG_PRINT(("ASRS "))
             break;
         }
+        DEBUG_PRINT(("%s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
         break;
     }
     case THUMB_2: {
@@ -1151,31 +1162,36 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
         switch ((instr >> 9) & 0x3) {
         case 0x0: {
             DEBUG_PRINT(("ADDS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
-            uint64_t result = (uint64_t)get_reg(rs) + get_reg(rn_or_imm);
-            set_reg(rd, result);
-            set_cc(result >> 31, result == 0, result > UINT32_MAX, CC_UNMOD); // TODO: FIX V FLAG
+            uint64_t unsigned_result = (uint64_t)rs_val + (uint64_t)get_reg(rn_or_imm);
+            int64_t signed_result = (int64_t)(int32_t)rs_val + (int64_t)(int32_t)get_reg(rn_or_imm);
+            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_reg(rd, unsigned_result);
             break;
         }
         case 0x1: {
             DEBUG_PRINT(("SUBS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
-            Word rn_val = get_reg(rn_or_imm);
-            Word result = rs_val - rn_val;
-            set_reg(rd, result);
-            set_cc(result >> 31, result == 0, rs_val >= rn_val, CC_UNMOD); // TODO: FIX V FLAG
+            uint64_t unsigned_result = (uint64_t)rs_val + ((uint64_t)~get_reg(rn_or_imm) + (uint64_t)1);
+            int64_t signed_result = (int64_t)(int32_t)rs_val + ((int64_t)(int32_t)~get_reg(rn_or_imm) + (int64_t)1);
+            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rs_val >= get_reg(rn_or_imm), signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_reg(rd, unsigned_result);
             break;
         }
         case 0x2: {
             DEBUG_PRINT(("ADDS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm))
-            uint64_t result = (uint64_t)get_reg(rs) + get_reg(rn_or_imm);
-            set_reg(rd, result);
-            set_cc(result >> 31, result == 0, result > UINT32_MAX, CC_UNMOD); // TODO: FIX V FLAG
-            exit(1);
+            uint64_t unsigned_result = (uint64_t)rs_val + (uint64_t)rn_or_imm;
+            int64_t signed_result = (int64_t)(int32_t)rs_val + (int64_t)(int32_t)rn_or_imm;
+            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_reg(rd, unsigned_result);
             break;
         }
-        case 0x3:
-            printf("SUBS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm);
-            exit(1);
+        case 0x3: {
+            DEBUG_PRINT(("SUBS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm))
+            uint64_t unsigned_result = (uint64_t)rs_val + ((uint64_t)~rn_or_imm + (uint64_t)1);
+            int64_t signed_result = (int64_t)(int32_t)rs_val + ((int64_t)(int32_t)~rn_or_imm + (int64_t)1);
+            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rs_val >= rn_or_imm, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_reg(rd, unsigned_result);
             break;
+        }
         }
         break;
     }
@@ -1191,7 +1207,7 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
         case 0x0:
             DEBUG_PRINT(("MOVS %s, #0x%X\n", register_to_cstr(rd), nn))
             set_reg(rd, nn);
-            set_cc(nn >> 7, nn == 0, CC_UNMOD, CC_UNMOD);
+            set_cc(CC_UNSET, nn == 0, CC_UNMOD, CC_UNMOD);
             break;
         case 0x1: {
             DEBUG_PRINT(("CMPS %s, #0x%X\n", register_to_cstr(rd), nn))
@@ -1223,12 +1239,43 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
         Word rs_val = get_reg(rs);
 
         switch ((instr >> 6) & 0xF) {
+        case 0x0: {
+            DEBUG_PRINT(("AND "))
+            Word result = rd_val & rs_val;
+            set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            set_reg(rd, result);
+            break;
+        }
+
+        case 0x8: {
+            DEBUG_PRINT(("TST "))
+            Word result = rd_val & rs_val;
+            set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            break;
+        }
+
         case 0xA: {
             DEBUG_PRINT(("CMP "))
             Word result = rd_val - rs_val;
             set_cc(result >> 31, result == 0, rd_val >= rs_val, CC_UNMOD); // TODO: FIX V FLAG            
             break;
         }
+
+        case 0xC: {
+            DEBUG_PRINT(("ORR "))
+            Word result = rd_val | rs_val;
+            set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            set_reg(rd, result);
+            break;
+        }
+        case 0xD: {
+            DEBUG_PRINT(("MUL "))
+            Word result = (uint64_t)rd_val * (uint64_t)rs_val;
+            set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            set_reg(rd, result);
+            break;
+        }
+
         case 0xE: {
             DEBUG_PRINT(("BICS "))
             Word result = rd_val & ~rs_val;
@@ -1243,7 +1290,7 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
         DEBUG_PRINT(("%s, %s\n", register_to_cstr(rd), register_to_cstr(rs)))
         break;
     }
-    case THUMB_5: {
+    case THUMB_5: { // NOTE: i do not think flags are set for this
         uint8_t rs = (((instr >> 6) & 1) << 3) | ((instr >> 3) & 0x7); // MSBs 
         uint8_t rd = (((instr >> 7) & 1) << 3) | (instr & 0x7); // MSBd
 
@@ -1251,13 +1298,16 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
 
         switch ((instr >> 8) & 0x3) {
         case 0x0:
-            printf("ADD\n");
-            exit(1);
+            DEBUG_PRINT(("ADD %s, %s\n", register_to_cstr(rd), register_to_cstr(rs)));
+            set_reg(rd, get_reg(rd) + rs_val);
             break;
-        case 0x1:
-            printf("CMP\n");
-            exit(1);
+        case 0x1: {
+            DEBUG_PRINT(("CMP %s, %s\n", register_to_cstr(rd), register_to_cstr(rs)));
+            uint64_t unsigned_result = (uint64_t)get_reg(rd) + ((uint64_t)~rs_val + (uint64_t)1);
+            int64_t signed_result = (int64_t)(int32_t)get_reg(rd) + ((int64_t)(int32_t)~rs_val + (int64_t)1);
+            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, get_reg(rd) >= rs_val, signed_result > INT32_MAX || signed_result < INT32_MIN);
             break;
+        }
         case 0x2: {
             if (rd == rs == 8) { // R8 = R8
                 DEBUG_PRINT(("NOP\n"))
@@ -1270,15 +1320,14 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
         }
         case 0x3:
             DEBUG_PRINT(("BX %s\n", register_to_cstr(rs)))
-
-            if (rs == 0xF) {
-                printf("THUMB special case r15 BX\n");
-                exit(1);
-            }
-
-            if (!(rs_val & 1)) // switch mode to ARM
+            if (!(rs_val & 0x1)) { // switch mode to ARM if rs bit 0 unset
                 cpu->registers.cpsr =  ~(1 << 5) & cpu->registers.cpsr;
-            cpu->registers.r15 = rs_val & ~1U; // masked bit 0 for alignment
+                // mask bit 1 since we need word alignment for ARM 32-bit instructions and bit 0 is already 0
+                cpu->registers.r15 = rs_val & ~0x2;
+            } else {
+                // mask bit 0 since we need half-word alignment for THUMB 16-bit instructions
+                cpu->registers.r15 = rs_val & ~0x1;
+            }
             break;
         }
         break;
@@ -1301,51 +1350,63 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
 
         switch ((instr >> 11) & 0x3) {
         case 0x0:
-            DEBUG_PRINT(("STR %s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn * 4))
+            DEBUG_PRINT(("STR "))
             write_mem(cpu->mem, get_reg(rb) + nn * 4, get_reg(rd), WORD_SIZE);
             break;
         case 0x1:
-            DEBUG_PRINT(("LDR %s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn * 4))
+            DEBUG_PRINT(("LDR "))
             set_reg(rd, read_mem(cpu->mem, get_reg(rb) + nn * 4, WORD_SIZE));
             break;
         case 0x2:
-            DEBUG_PRINT(("STRB %s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn))
-            exit(1);
+            DEBUG_PRINT(("STRB "))
             write_mem(cpu->mem, get_reg(rb) + nn, get_reg(rd), BYTE_SIZE);
             break;
         case 0x3:
-            DEBUG_PRINT(("LDRB Rd,[Rb,#nn]"))
-            exit(1);
+            DEBUG_PRINT(("LDRB "))
+            set_reg(rd, read_mem(cpu->mem, get_reg(rb) + nn, BYTE_SIZE));
             break;
         }
+        DEBUG_PRINT(("%s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn))
         break;
     }
     case THUMB_10: {
-        printf("THUMB_10");
-        exit(1);
-
+        uint8_t nn = ((instr >> 6) & 0x1F) * 2; // (0-62, step 2)
         uint8_t rb = (instr >> 3) & 0x7;
         uint8_t rd = instr & 0x7;
-        uint8_t nn = ((instr >> 6) & 0x1F) * 2;
+
+        Word addr = get_reg(rb) + nn;
 
         switch ((instr >> 11) & 1) {
-        case 0:
+        case 0x0:
             DEBUG_PRINT(("STRH "))
-            
+            write_mem(cpu->mem, addr, get_reg(rd), HALF_WORD_SIZE);
             break;
-        case 1:
+        case 0x1:
             DEBUG_PRINT(("LDRH "))
-
+            set_reg(rd, read_mem(cpu->mem, addr, HALF_WORD_SIZE));
             break;
         }
-
         DEBUG_PRINT(("%s, [%s, #0x%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn))
-        exit(1);
         break;
     }
     case THUMB_11: {
-        printf("THUMB 11\n");
-        exit(1);
+        uint8_t rd = (instr >> 8) & 0x7;
+        uint16_t nn = (instr & 0xFF) * 4; // (0-1020, step 4)
+
+        Word addr = get_reg(0xD) + nn;
+
+        switch ((instr >> 11) & 1) {
+        case 0x0:
+            DEBUG_PRINT(("STR "))
+            write_mem(cpu->mem, addr, get_reg(rd), WORD_SIZE);
+            break;
+        case 0x1:
+            DEBUG_PRINT(("LDR "))
+            set_reg(rd, read_mem(cpu->mem, addr, WORD_SIZE));
+            break;
+        }
+        DEBUG_PRINT(("%s, [sp, #0x%X]\n", register_to_cstr(rd), nn))
+        break;
     }
     case THUMB_12: {
         uint8_t rd = (instr >> 8) & 0x7;

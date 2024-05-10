@@ -48,8 +48,26 @@ Memory* init_mem(const char *bios_file, const char *rom_file) {
     return mem;
 }
 
+// ARM CPU does not support misaligned addresses
+// https://problemkaputt.de/gbatek.htm#armcpumemoryalignments
+static inline uint32_t align_address(uint32_t addr, size_t size) {
+    switch (size) {
+    case 4: return addr & ~0x3; // word transfer
+    case 2: return addr & ~0x1; // half-word transfer
+    }
+
+    // byte transfers don't need to be aligned
+    return addr;
+}
+
 uint32_t read_mem(Memory *mem, uint32_t addr, size_t size) {
     uint32_t word = 0;
+
+    addr = align_address(addr, size);
+
+    switch (addr) {
+    case 0x04000130: return mem->reg_keyinput;
+    }
 
     if (addr <= 0x00003FFF) {
         memcpy(&word, mem->bios + addr, size);
@@ -59,8 +77,6 @@ uint32_t read_mem(Memory *mem, uint32_t addr, size_t size) {
         memcpy(&word, mem->internal_wram + ((addr - 0x03000000) % 0x8000), size);
     } else if (addr >= 0x04000000 && addr <= 0x04000054) {
         return ppu_read_register(addr);
-    } else if (addr == 0x04000130) {
-        return mem->reg_keyinput;
     } else if (addr >= 0x08000000 && addr <= 0x81FFFFFF) {
         memcpy(&word, mem->rom + (addr - 0x8000000), size);
     } else {
@@ -72,14 +88,23 @@ uint32_t read_mem(Memory *mem, uint32_t addr, size_t size) {
 }
 
 void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t size) {
+    addr = align_address(addr, size);
+
+    switch (addr) {
+    // case 0x04000204:
+    //     mem->reg_waitcnt = val;
+    //     return;
+    case 0x04000208:
+        memcpy(&mem->reg_ime, &val, size);
+        return;
+    }
+
     if (addr >= 0x02000000 && addr <= 0x02FFFFFF) {
         memcpy(mem->external_wram + ((addr - 0x02000000) % 0x40000), &val, size);
     } else if (addr >= 0x03000000 && addr <= 0x03FFFFFF) {
         memcpy(mem->internal_wram + ((addr - 0x03000000) % 0x8000), &val, size);
     } else if (addr >= 0x04000000 && addr <= 0x04000054) {
         ppu_set_register(addr, val);
-    } else if (addr == 0x04000208) {
-        mem->reg_ime = val;
     } else if (addr >= 0x05000000 && addr <= 0x5FFFFFF) {
         memcpy(pallete_ram + ((addr - 0x05000000) % 0x400), &val, size);
     } else if (addr >= 0x06000000 && addr <= 0x06FFFFFF) {
