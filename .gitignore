@@ -6,3 +6,7 @@ Makefile
 bios.bin
 .idea
 .vscode
+
+# Added by cargo
+
+/target
