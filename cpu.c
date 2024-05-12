@@ -463,7 +463,7 @@ static inline void set_reg(uint8_t reg_id, Word val) {
     }
 }
 
-static inline Word fetch() {
+static __attribute__((always_inline)) Word fetch() {
     Word instr;
 
     if (THUMB_ACTIVATED) {
@@ -477,7 +477,7 @@ static inline Word fetch() {
     return instr;
 }
 
-static inline InstrType decode(Word instr) {
+static __attribute__((always_inline)) InstrType decode(Word instr) {
     cpu->pipeline = fetch();
 
     if (THUMB_ACTIVATED) {
@@ -580,41 +580,44 @@ static inline InstrType decode(Word instr) {
     }
 }
 
-static inline Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift) {
+static __attribute__((always_inline)) Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift, bool shift_by_immediate) {
     switch (shift_type) {
     case SHIFT_TYPE_LSL:
-        if (!shift) { // LSL#0: No shift performed, ie. directly Op2=Rm, the C flag is NOT affected.
+        if (shift == 0) { // LSL#0: No shift performed, ie. directly Op2=Rm, the C flag is NOT affected.
             cpu->shifter_carry = CC_UNMOD;
             break;
         }
-        cpu->shifter_carry = (operand_2 << (shift - 1)) >> 31;
+        cpu->shifter_carry =  shift > 31 ? 0 : (operand_2 << (shift - 1)) >> 31;
         operand_2 = shift > 31 ? 0 : operand_2 << shift;
         break;
     case SHIFT_TYPE_LSR:
-        if (shift > 31 || shift == 0) { // LSR#0: Interpreted as LSR#32, ie. Op2 becomes zero, C becomes Bit 31 of Rm.
+        if (shift_by_immediate && (shift == 0)) { // LSR#0: Op2 becomes zero, C becomes Bit 31 of Rm.
             cpu->shifter_carry = operand_2 >> 31;
             operand_2 = 0;
             break;
         }
-        cpu->shifter_carry = (operand_2 >> (shift - 1)) & 1;
-        operand_2 >>= shift;
+        cpu->shifter_carry = shift > 31 ? 0 : (operand_2 >> (shift - 1)) & 1;
+        operand_2 = shift > 31 ? 0 : operand_2 >> shift;
         break;
     case SHIFT_TYPE_ASR:
-        if (shift > 31 || shift == 0) { // ASR#0: Interpreted as ASR#32, ie. Op2 and C are filled by Bit 31 of Rm.
+        if (shift_by_immediate && (shift == 0)) { // ASR#0: Op2 and C are filled by Bit 31 of Rm.
             Bit msb = operand_2 >> 31;
             cpu->shifter_carry = msb;
             operand_2 = msb ? ~0 : 0;
             break;
         }
-        cpu->shifter_carry = ((int32_t)operand_2 >> (shift - 1)) & 1;
-        operand_2 = (int32_t)operand_2 >> shift;
+        cpu->shifter_carry = shift > 31 ? operand_2 >> 31
+            : ((int32_t)operand_2 >> (shift - 1)) & 1;
+        operand_2 = shift > 31 ? (operand_2 >> 31 ? ~0 : 0) 
+            : (int32_t)operand_2 >> shift;
         break;
-    case SHIFT_TYPE_ROR: // TODO: FIX THIS!
-        if (shift > 31 || shift == 0) { // ROR#0: Interpreted as RRX#1 (RCR), like ROR#1, but Op2 Bit 31 set to old C.
-            cpu->shifter_carry = CC_UNMOD;
+    case SHIFT_TYPE_ROR:
+        if (shift_by_immediate && (shift == 0)) { // ROR#0: Interpreted as RRX#1 (RCR), like ROR#1, but Op2 Bit 31 set to old C.
+            cpu->shifter_carry = operand_2 & 1;
+            operand_2 = ((uint32_t)get_cc(C) << 31) | (operand_2 >> 1);
             break;
         }
-        operand_2 = (operand_2 >> shift) | (operand_2 << (32 - shift));
+        operand_2 = (operand_2 >> (shift % 32)) | (operand_2 << (32 - (shift % 32)));
         cpu->shifter_carry = operand_2 >> 31;
         break;
     default:
@@ -624,7 +627,7 @@ static inline Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t s
     return operand_2;
 }
 
-static inline int arm_exec_instr(uint32_t instr, InstrType type) {
+static int arm_exec_instr(uint32_t instr, InstrType type) {
     uint8_t cond = (instr >> 28) & 0xF;
 
     if (eval_cond(cond)) {
@@ -755,7 +758,8 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             Word rn_r15_offset = 0;
 
             if (i) {
-                operand2 = barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr & 0xF00) >> 8) * 2);
+                uint8_t shift_amount = ((instr & 0xF00) >> 8) * 2;
+                operand2 = barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, shift_amount, false);
             } else {
                 Bit r = (instr >> 4) & 1;
 
@@ -768,10 +772,11 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                     if (rn == 0xF) rn_r15_offset = 4;
                     if (rm == 0xF) rm_r15_offset = 4;
 
-                    uint8_t shift_reg_val = get_reg((instr >> 8) & 0xF) & 0xFF; // r0-r14, only 0-255
-                    operand2 = barrel_shifter(shift_type, get_reg(rm) + rm_r15_offset, shift_reg_val);
+                    uint8_t shift_amount = get_reg((instr >> 8) & 0xF) & 0xFF;
+                    operand2 = barrel_shifter(shift_type, get_reg(rm) + rm_r15_offset, shift_amount, false);
                 } else {
-                    operand2 = barrel_shifter(shift_type, get_reg(rm), (instr >> 7) & 0x1F);
+                    uint8_t shift_amount = (instr >> 7) & 0x1F;
+                    operand2 = barrel_shifter(shift_type, get_reg(rm), shift_amount, true);
                 }
             }
 
@@ -899,7 +904,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
         }
         case HalfwordDataTransfer: {
             Bit p = (instr >> 24) & 1;
-            Bit u = (instr >> 23) & 1; // if unset offset is negative (subtracted from base)
+            Bit u = (instr >> 23) & 1; // if set add offset from base otherwise subtract (signed bit for offset)
             Bit i = (instr >> 22) & 1;
             Bit w = (instr >> 21) & 1;
             Bit l = (instr >> 20) & 1;
@@ -912,32 +917,33 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 get_reg(instr & 0xF);
             if (!u) offset = -offset;
 
-            Word addr = get_reg(rn) + offset;
+            Word addr = get_reg(rn) + (p ? offset : 0); // apply offset initially if pre-indexing is set
             bool should_write_back = (p && w) || !p;
 
             if (l) {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
                     DEBUG_PRINT(("LDR%sH ", cond_to_cstr(cond)))
-                    set_reg(rd, read_mem(cpu->mem, addr - (p ? 0 : offset), HALF_WORD_ACCESS));
+                    set_reg(rd, read_mem(cpu->mem, addr, HALF_WORD_ACCESS));
                     break;
                 case 2:
                     DEBUG_PRINT(("LDR%sSB ", cond_to_cstr(cond)))
-                    exit(1);
+                    set_reg(rd, (int32_t)(int8_t)read_mem(cpu->mem, addr, BYTE_ACCESS));
                     break;
                 case 3:
                     DEBUG_PRINT(("LDR%sSH ", cond_to_cstr(cond)))
-                    exit(1);
+                    set_reg(rd, (int32_t)(int16_t)read_mem(cpu->mem, addr, HALF_WORD_ACCESS));
                     break;
                 }
             } else {
                 switch ((instr >> 5) & 0x3) {
                 case 1:
                     DEBUG_PRINT(("STR%sH ", cond_to_cstr(cond)))
-                    write_mem(cpu->mem, addr - (p ? 0 : offset), get_reg(rd), HALF_WORD_ACCESS);
+                    write_mem(cpu->mem, addr, get_reg(rd), HALF_WORD_ACCESS);
                     break;
                 case 2:
                     DEBUG_PRINT(("LDR%sD ", cond_to_cstr(cond)))
+                    printf("b");
                     exit(1);
                     break;
                 case 3:
@@ -947,12 +953,13 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 }
             }
 
-            if (should_write_back) set_reg(rn, addr);
+            if (should_write_back && rn != 0xF) 
+                if (rd != rn)
+                    set_reg(rn, get_reg(rn) + offset);
 
             DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
             if (p) {
                 DEBUG_PRINT(("[%s", register_to_cstr(rn)))
-
                 if (i) {
                     if (offset) {
                         DEBUG_PRINT((", #0x%X]", !u ? -offset : offset))
@@ -962,20 +969,16 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 } else {
                     DEBUG_PRINT((", %s]", register_to_cstr(instr & 0xF)))
                 }
-
-                if ((p && w) || !p) {
-                    DEBUG_PRINT(("!\n"));
-                } else {
-                    DEBUG_PRINT(("\n"))
-                }
+                DEBUG_PRINT(("%s", should_write_back ? "!" : ""))
             } else {
                 DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
                 if (i) {
-                    DEBUG_PRINT(("#0x%X\n", !u ? -offset : offset))
+                    DEBUG_PRINT(("#0x%X", !u ? -offset : offset))
                 } else {
-                    DEBUG_PRINT(("%s\n", register_to_cstr(instr & 0xF)))
+                    DEBUG_PRINT(("%s", register_to_cstr(instr & 0xF)))
                 }
             }
+            DEBUG_PRINT(("\n"))
             break;
         }
         case SingleDataTransfer: {
@@ -991,17 +994,12 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             uint8_t rm = instr & 0xF;
 
             Word operand_2 = i ? 
-                barrel_shifter((instr >> 5) & 0x3, get_reg(instr & 0xF), (instr >> 7) & 0x1F) : 
-                instr & 0xFFF;
+                barrel_shifter((instr >> 5) & 0x3, get_reg(instr & 0xF), (instr >> 7) & 0x1F, true) 
+                    : instr & 0xFFF;
             if (!u) operand_2 = -operand_2;
 
             Word addr = get_reg(rn) + (p ? operand_2 : 0); // base address with offset applied initially if pre-indexing is set
             bool should_write_back = !p || (p && t);
-
-            if (i && rm == 0xF) {
-                fprintf(stderr, "CPU Error [instruction: %08X]: r15 must not be specified as the register offset (rm)\n", instr);
-                exit(1);
-            }
 
             if (p && b && !t && l && rd == 0xF && cond == 0xF) {
                 printf("PLD INSTRUCTION!\n");
@@ -1016,11 +1014,9 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 break;
             case 1:
                 DEBUG_PRINT(("LDR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t && !p ? "T" : ""))
-
                 // LDR CASE: rotated read for misaligned word transfers (shift by (addr AND 3) * 8)
                 Word read_value = b ? read_mem(cpu->mem, addr, BYTE_ACCESS)
-                    : barrel_shifter(SHIFT_TYPE_ROR, read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 0x3) * 8);
-
+                    : barrel_shifter(SHIFT_TYPE_ROR, read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 0x3) * 8, false);
                 set_reg(rd, read_value);
                 break;
             }
@@ -1029,11 +1025,26 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 if (rd != rn)
                     set_reg(rn, get_reg(rn) + operand_2);
 
-            DEBUG_PRINT(("%s, [%s", register_to_cstr(rd), register_to_cstr(rn)))
+            DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
             if (p) {
-                DEBUG_PRINT((", #0x%X]%s", operand_2, should_write_back ? "!" : ""))
+                DEBUG_PRINT(("[%s", register_to_cstr(rn)))
+                if (i) {
+                    if (operand_2) {
+                        DEBUG_PRINT((", #0x%X]", !u ? -operand_2 : operand_2))
+                    } else {
+                        DEBUG_PRINT(("]"))
+                    }
+                } else {
+                    DEBUG_PRINT((", %s]", register_to_cstr(instr & 0xF)))
+                }
+                DEBUG_PRINT(("%s", should_write_back ? "!" : ""))
             } else {
-                DEBUG_PRINT(("], #0x%X", operand_2))
+                DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
+                if (i) {
+                    DEBUG_PRINT(("#0x%X", !u ? -operand_2 : operand_2))
+                } else {
+                    DEBUG_PRINT(("%s", register_to_cstr(instr & 0xF)))
+                }
             }
             DEBUG_PRINT(("\n"))
             break;
@@ -1117,7 +1128,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
             Bit c = (instr >> 16) & 1; // if set, modify psr control (processor mode) bits
 
             Word operand = i ?
-                barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr >> 8) & 0xF) * 2) :
+                barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr >> 8) & 0xF) * 2, true) :
                 get_reg(instr & 0xF);
 
             if (psr) {
@@ -1163,7 +1174,7 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
                 set_reg(rd, temp);
             } else {
                 // SWP CASE: rotated read for misaligned word transfers (shift by (addr AND 3) * 8)
-                Word temp = barrel_shifter(SHIFT_TYPE_ROR, read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 3) * 8);
+                Word temp = barrel_shifter(SHIFT_TYPE_ROR, read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 3) * 8, false);
                 write_mem(cpu->mem, get_reg(rn), get_reg(rm), WORD_ACCESS);
                 set_reg(rd, temp);
             }
@@ -1182,16 +1193,16 @@ static inline int arm_exec_instr(uint32_t instr, InstrType type) {
     return 1;
 }
 
-static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
+static int thumb_exec_instr(uint16_t instr, InstrType type) {
     switch (type) {
     case THUMB_1: {
         uint8_t opcode = (instr >> 11) & 0x3;
-        uint8_t offset = (instr >> 6) & 0x1F;
+        uint8_t shift_amount = (instr >> 6) & 0x1F;
 
         uint8_t rs = (instr >> 3) & 0x7;
         uint8_t rd = instr & 0x7;
 
-        Word operand_2 = barrel_shifter(opcode, get_reg(rs), offset);
+        Word operand_2 = barrel_shifter(opcode, get_reg(rs), shift_amount, true);
         set_reg(rd, operand_2);
         set_cc(operand_2 >> 31, operand_2 == 0, cpu->shifter_carry, CC_UNMOD);
 
@@ -1206,7 +1217,7 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
             DEBUG_PRINT(("ASRS "))
             break;
         }
-        DEBUG_PRINT(("%s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), offset))
+        DEBUG_PRINT(("%s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), shift_amount))
         break;
     }
     case THUMB_2: {
@@ -1671,7 +1682,7 @@ static inline int thumb_exec_instr(uint16_t instr, InstrType type) {
     return 1;
 }
 
-static inline int execute(Word instr, InstrType type) {
+static __attribute__((always_inline)) int execute(Word instr, InstrType type) {
     int32_t original_pc = cpu->registers.r15;
     int cycles = 0;
 
@@ -1689,7 +1700,7 @@ static inline int execute(Word instr, InstrType type) {
     return 1;
 }
 
-static inline int tick_cpu(void) {
+static __attribute__((always_inline)) int tick_cpu(void) {
     Word instr = cpu->pipeline ? cpu->pipeline : fetch();
     InstrType type;
 
@@ -1730,7 +1741,7 @@ uint16_t* compute_frame(uint16_t key_input) {
 
     int total_cycles = 0;
     while (total_cycles < 280896) {
-        // if (cpu->registers.r15 == 0x080011E8) {
+        // if (cpu->registers.r15 == 0x08000BBC) {
         //     print_dump();
         //     exit(1);
         // }
