@@ -78,7 +78,7 @@ uint32_t read_mem(Memory *mem, uint32_t addr, size_t size) {
     } else if (addr >= 0x04000000 && addr <= 0x04000054) {
         return ppu_read_register(addr);
     } else if (addr >= 0x08000000 && addr <= 0x81FFFFFF) {
-        memcpy(&word, mem->rom + (addr - 0x8000000), size);
+        memcpy(&word, mem->rom + (addr - 0x08000000), size);
     } else {
         fprintf(stderr, "read to unmapped memory region: 0x%08X\n", addr);
         exit(1);
@@ -91,9 +91,6 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t size) {
     addr = align_address(addr, size);
 
     switch (addr) {
-    // case 0x04000204:
-    //     mem->reg_waitcnt = val;
-    //     return;
     case 0x04000208:
         memcpy(&mem->reg_ime, &val, size);
         return;

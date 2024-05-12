@@ -11,7 +11,6 @@ typedef struct {
 
     uint16_t reg_ime;
     uint16_t reg_keyinput;
-    uint16_t reg_waitcnt;
 } Memory;
 
 Memory* init_mem(const char *bios_file, const char *rom_file);
