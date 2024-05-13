@@ -19,6 +19,8 @@
 #define SET_PROCESSOR_MODE(mode)    cpu->registers.cpsr &= ~0x1F; \
                                     cpu->registers.cpsr |= mode;
 
+#define ROR(operand, shift_amount) ((operand) >> (shift_amount) | (operand) << (32 - (shift_amount)))
+
 typedef bool Bit;
 typedef uint32_t Word;
 
@@ -580,50 +582,79 @@ static __attribute__((always_inline)) InstrType decode(Word instr) {
     }
 }
 
-static __attribute__((always_inline)) Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift, bool shift_by_immediate) {
+static Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift, bool shift_by_immediate) {
+    // EDGE CASE: Rs=00h carry flag not affected
+    if (!shift_by_immediate && (shift == 0))
+        return operand_2;
+
     switch (shift_type) {
     case SHIFT_TYPE_LSL:
-        if (shift == 0) { // LSL#0: No shift performed, ie. directly Op2=Rm, the C flag is NOT affected.
+        switch (shift) {
+        case 0: // LSL#0: No shift performed, ie. directly Op2=Rm, the C flag is NOT affected.
             cpu->shifter_carry = CC_UNMOD;
             break;
+        case 32: // LSL#32: LSL by 32 has result zero, carry out equal to bit 0 of Rm.
+            cpu->shifter_carry = operand_2 & 1;
+            operand_2 = 0;
+            break;
+        default: // LSL by more than 32 has result zero, carry out zero.
+            cpu->shifter_carry = shift > 32 ? 0
+                : (operand_2 << (shift - 1)) >> 31;
+            operand_2 = shift > 32 ? 0
+                : operand_2 << shift;
         }
-        cpu->shifter_carry =  shift > 31 ? 0 : (operand_2 << (shift - 1)) >> 31;
-        operand_2 = shift > 31 ? 0 : operand_2 << shift;
         break;
     case SHIFT_TYPE_LSR:
-        if (shift_by_immediate && (shift == 0)) { // LSR#0: Op2 becomes zero, C becomes Bit 31 of Rm.
+        switch (shift) {
+        case 0: // LSR#0 (shift by immediate): Interpreted as LSR#32, ie. Op2 becomes zero, C becomes Bit 31 of Rm.
+            if (shift_by_immediate) {
+                cpu->shifter_carry = operand_2 >> 31;
+                operand_2 = 0;
+            }
+            break;
+        case 32: // LSR#32: LSR by 32 has result zero, carry out equal to bit 31 of Rm.
             cpu->shifter_carry = operand_2 >> 31;
             operand_2 = 0;
             break;
+        default: // LSR by more than 32 has result zero, carry out zero.
+            cpu->shifter_carry = shift > 32 ? 0 
+                : (operand_2 >> (shift - 1)) & 1;
+            operand_2 = shift > 32 ? 0 
+                : operand_2 >> shift;
         }
-        cpu->shifter_carry = shift > 31 ? 0 : (operand_2 >> (shift - 1)) & 1;
-        operand_2 = shift > 31 ? 0 : operand_2 >> shift;
         break;
     case SHIFT_TYPE_ASR:
-        if (shift_by_immediate && (shift == 0)) { // ASR#0: Op2 and C are filled by Bit 31 of Rm.
+        // ASR#0 (shift by immediate): Interpreted as ASR#32, ie. Op2 and C are filled by Bit 31 of Rm.
+        if (shift_by_immediate && (shift == 0)) {
             Bit msb = operand_2 >> 31;
             cpu->shifter_carry = msb;
             operand_2 = msb ? ~0 : 0;
             break;
         }
+
+        // ASR by 32 or more has result filled with and carry out equal to bit 31 of Rm.
         cpu->shifter_carry = shift > 31 ? operand_2 >> 31
             : ((int32_t)operand_2 >> (shift - 1)) & 1;
-        operand_2 = shift > 31 ? (operand_2 >> 31 ? ~0 : 0) 
+        operand_2 = shift > 31 ? (operand_2 >> 31 ? ~0 : 0)
             : (int32_t)operand_2 >> shift;
         break;
     case SHIFT_TYPE_ROR:
-        if (shift_by_immediate && (shift == 0)) { // ROR#0: Interpreted as RRX#1 (RCR), like ROR#1, but Op2 Bit 31 set to old C.
+        // ROR#0 (shift by immediate): Interpreted as RRX#1 (RCR), like ROR#1, but Op2 Bit 31 set to old C.
+        if (shift_by_immediate && (shift == 0)) {
             cpu->shifter_carry = operand_2 & 1;
             operand_2 = ((uint32_t)get_cc(C) << 31) | (operand_2 >> 1);
             break;
         }
-        operand_2 = (operand_2 >> (shift % 32)) | (operand_2 << (32 - (shift % 32)));
+
+        // ROR by n where n is greater than 32 will give the same result and carry out as ROR by n-32 repeated until shift in the range of 1-32
+        operand_2 = (operand_2 >> (shift & 31)) | (operand_2 << ((-shift) & 31));
         cpu->shifter_carry = operand_2 >> 31;
         break;
     default:
         fprintf(stderr, "CPU Error: invalid shift opcode\n");
         exit(1);
     }
+
     return operand_2;
 }
 
@@ -801,24 +832,22 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
                 DEBUG_PRINT(("SUB%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
                 uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1);
                 int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1);
-                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 set_reg(rd, unsigned_result);
                 break;
             }
-            case 0x3: {
+            case 0x3: { // TODO: BROKEN
                 DEBUG_PRINT(("RSB%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-
                 printf("RSB: %08X\n", cpu->registers.r15);
                 print_dump();
                 exit(1);
-
                 break;
             }
             case 0x4: {
                 DEBUG_PRINT(("ADD%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
                 uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2;
                 int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2;
-                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 set_reg(rd, unsigned_result);
                 break;
             }
@@ -826,23 +855,23 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
                 DEBUG_PRINT(("ADC%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
                 uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2 + (uint64_t)get_cc(C);
                 int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2 + (int64_t)get_cc(C);
-                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 set_reg(rd, unsigned_result);
                 break;
             }
-            case 0x6: {
-                DEBUG_PRINT(("SBC%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1) + ((uint64_t)get_cc(C) - 1);
-                int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1) + ((int64_t)get_cc(C) - 1);
-                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            case 0x6: { // TODO: BROKEN
+                DEBUG_PRINT(("SBC%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
+                uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1) + (uint64_t)get_cc(C) + ((uint64_t)~1 + 1);
+                int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1) + (int64_t)get_cc(C) + (int64_t)(int32_t)(~1 + 1);
+                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, CC_UNSET, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 set_reg(rd, unsigned_result);
                 break;
             }
-            case 0x7: {
+            case 0x7: { // TODO: BROKEN
                 DEBUG_PRINT(("RSC%s%s %s, %s, #0x%X\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rn), operand2))
                 uint64_t unsigned_result = (uint64_t)operand2 + ((uint64_t)~rn_val + (uint64_t)1) + ((uint64_t)get_cc(C) - 1);
                 int64_t signed_result = (int64_t)(int32_t)operand2 + ((int64_t)(int32_t)~rn_val + (int64_t)1) + ((int64_t)get_cc(C) - 1);
-                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, operand2 >= rn_val, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, operand2 >= rn_val, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 set_reg(rd, unsigned_result);
                 break;
             }
@@ -862,14 +891,14 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
                 DEBUG_PRINT(("CMP%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
                 uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1);
                 int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1);
-                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 break;
             }
             case 0xB: {
                 DEBUG_PRINT(("CMN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
                 uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2;
                 int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2;
-                if (s) set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
                 break;
             }
             case 0xC: {
@@ -993,9 +1022,10 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
             uint8_t rd = (instr >> 12) & 0xF;
             uint8_t rm = instr & 0xF;
 
-            Word operand_2 = i ? 
-                barrel_shifter((instr >> 5) & 0x3, get_reg(instr & 0xF), (instr >> 7) & 0x1F, true) 
-                    : instr & 0xFFF;
+            uint8_t shift_amount = (instr >> 7) & 0x1F;
+            Word operand_2 = i ? barrel_shifter((instr >> 5) & 0x3, get_reg(instr & 0xF), shift_amount, true) 
+                : instr & 0xFFF;
+
             if (!u) operand_2 = -operand_2;
 
             Word addr = get_reg(rn) + (p ? operand_2 : 0); // base address with offset applied initially if pre-indexing is set
@@ -1016,7 +1046,7 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
                 DEBUG_PRINT(("LDR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t && !p ? "T" : ""))
                 // LDR CASE: rotated read for misaligned word transfers (shift by (addr AND 3) * 8)
                 Word read_value = b ? read_mem(cpu->mem, addr, BYTE_ACCESS)
-                    : barrel_shifter(SHIFT_TYPE_ROR, read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 0x3) * 8, false);
+                    : ROR(read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 0x3) * 8);
                 set_reg(rd, read_value);
                 break;
             }
@@ -1127,9 +1157,8 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
             Bit f = (instr >> 19) & 1; // if set, modify psr cc flag bits
             Bit c = (instr >> 16) & 1; // if set, modify psr control (processor mode) bits
 
-            Word operand = i ?
-                barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, ((instr >> 8) & 0xF) * 2, true) :
-                get_reg(instr & 0xF);
+            Word operand = i ? ROR(instr & 0xFF, ((instr >> 8) & 0xF) * 2)
+                : get_reg(instr & 0xF);
 
             if (psr) {
                 DEBUG_PRINT(("spsr_%s, ", processor_mode_to_cstr(PROCESSOR_MODE)))
@@ -1174,7 +1203,7 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
                 set_reg(rd, temp);
             } else {
                 // SWP CASE: rotated read for misaligned word transfers (shift by (addr AND 3) * 8)
-                Word temp = barrel_shifter(SHIFT_TYPE_ROR, read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 3) * 8, false);
+                Word temp = ROR(read_mem(cpu->mem, addr, WORD_ACCESS), (addr & 3) * 8);
                 write_mem(cpu->mem, get_reg(rn), get_reg(rm), WORD_ACCESS);
                 set_reg(rd, temp);
             }
@@ -1197,12 +1226,12 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
     switch (type) {
     case THUMB_1: {
         uint8_t opcode = (instr >> 11) & 0x3;
-        uint8_t shift_amount = (instr >> 6) & 0x1F;
-
         uint8_t rs = (instr >> 3) & 0x7;
         uint8_t rd = instr & 0x7;
 
+        uint8_t shift_amount = (instr >> 6) & 0x1F;
         Word operand_2 = barrel_shifter(opcode, get_reg(rs), shift_amount, true);
+
         set_reg(rd, operand_2);
         set_cc(operand_2 >> 31, operand_2 == 0, cpu->shifter_carry, CC_UNMOD);
 
@@ -1232,7 +1261,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             DEBUG_PRINT(("ADDS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
             uint64_t unsigned_result = (uint64_t)rs_val + (uint64_t)get_reg(rn_or_imm);
             int64_t signed_result = (int64_t)(int32_t)rs_val + (int64_t)(int32_t)get_reg(rn_or_imm);
-            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
             set_reg(rd, unsigned_result);
             break;
         }
@@ -1240,7 +1269,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             DEBUG_PRINT(("SUBS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
             uint64_t unsigned_result = (uint64_t)rs_val + ((uint64_t)~get_reg(rn_or_imm) + (uint64_t)1);
             int64_t signed_result = (int64_t)(int32_t)rs_val + ((int64_t)(int32_t)~get_reg(rn_or_imm) + (int64_t)1);
-            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rs_val >= get_reg(rn_or_imm), signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, rs_val >= get_reg(rn_or_imm), signed_result > INT32_MAX || signed_result < INT32_MIN);
             set_reg(rd, unsigned_result);
             break;
         }
@@ -1248,7 +1277,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             DEBUG_PRINT(("ADDS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm))
             uint64_t unsigned_result = (uint64_t)rs_val + (uint64_t)rn_or_imm;
             int64_t signed_result = (int64_t)(int32_t)rs_val + (int64_t)(int32_t)rn_or_imm;
-            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
             set_reg(rd, unsigned_result);
             break;
         }
@@ -1256,7 +1285,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             DEBUG_PRINT(("SUBS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm))
             uint64_t unsigned_result = (uint64_t)rs_val + ((uint64_t)~rn_or_imm + (uint64_t)1);
             int64_t signed_result = (int64_t)(int32_t)rs_val + ((int64_t)(int32_t)~rn_or_imm + (int64_t)1);
-            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, rs_val >= rn_or_imm, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, rs_val >= rn_or_imm, signed_result > INT32_MAX || signed_result < INT32_MIN);
             set_reg(rd, unsigned_result);
             break;
         }
@@ -1376,7 +1405,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             DEBUG_PRINT(("CMP %s, %s\n", register_to_cstr(rd), register_to_cstr(rs)));
             uint64_t unsigned_result = (uint64_t)get_reg(rd) + ((uint64_t)~rs_val + (uint64_t)1);
             int64_t signed_result = (int64_t)(int32_t)get_reg(rd) + ((int64_t)(int32_t)~rs_val + (int64_t)1);
-            set_cc(signed_result < 0, (uint32_t)unsigned_result == 0, get_reg(rd) >= rs_val, signed_result > INT32_MAX || signed_result < INT32_MIN);
+            set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, get_reg(rd) >= rs_val, signed_result > INT32_MAX || signed_result < INT32_MIN);
             break;
         }
         case 0x2: {
