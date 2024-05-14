@@ -5,6 +5,8 @@
 #include "cpu.h"
 #include "memory.h"
 
+#define CYCLES_PER_FRAME 280896
+
 #define WORD_ACCESS         4
 #define HALF_WORD_ACCESS    2
 #define BYTE_ACCESS         1
@@ -17,16 +19,22 @@
 #define PROCESSOR_MODE      (cpu->registers.cpsr & 0x1F)
 
 #define SET_PROCESSOR_MODE(mode)    cpu->registers.cpsr &= ~0x1F; \
-                                    cpu->registers.cpsr |= mode;
+                                    cpu->registers.cpsr |= (mode);
 
-#define ROR(operand, shift_amount) ((operand) >> (shift_amount) | (operand) << (32 - (shift_amount)))
+#define ROR(operand, shift_amount) (((operand) >> ((shift_amount) & 31)) | ((operand) << ((-(shift_amount)) & 31)))
+
+// used to fix pipeline flush edge case on pc updates 
+// that are pointing to PC(+2 FOR THUMB)(+4 FOR ARM)
+// which in the execute stage (for this implementation) r15 = PC (+2/+4 respectively)
+#define PC_UPDATE(new_pc)   cpu->registers.r15 = new_pc; \ 
+                            cpu->pipeline = 0; \
 
 typedef bool Bit;
 typedef uint32_t Word;
 
 static inline Word get_reg(uint8_t reg_id);
 static inline Word get_psr_reg(void);
-static inline int tick_cpu(void);
+static inline size_t tick_cpu(void);
 
 typedef enum {
     SHIFT_TYPE_LSL,
@@ -211,11 +219,15 @@ void print_dump(void) {
     }
     printf("cpsr: %08X\n", cpu->registers.cpsr);
     printf("current psr: %08X\n", get_psr_reg());
-    if (cpu->pipeline) printf("pipeline (next instruction): %08X\n", cpu->pipeline);
+    if (cpu->pipeline) {
+        printf("pipeline (next instruction): %08X\n", cpu->pipeline);
+    } else {
+        printf("PIPELINE FLUSH, RE-FILL");
+    }
     printf("\n");
 }
 
-static inline Word get_psr_reg(void) {
+static Word get_psr_reg(void) {
     switch (PROCESSOR_MODE) {
     case User:
     case System: return cpu->registers.cpsr;
@@ -227,7 +239,7 @@ static inline Word get_psr_reg(void) {
     }
 }
 
-static inline void set_psr_reg(Word val) {
+static void set_psr_reg(Word val) {
     switch (PROCESSOR_MODE) {
     case User:
     case System:
@@ -251,7 +263,7 @@ static inline void set_psr_reg(Word val) {
     }
 }
 
-static inline Bit get_cc(Flag cc) {
+static Bit get_cc(Flag cc) {
     switch (cc) {
     case N: return (get_psr_reg() >> 31) & 1;
     case Z: return (get_psr_reg() >> 30) & 1;
@@ -260,7 +272,7 @@ static inline Bit get_cc(Flag cc) {
     }
 }
 
-static inline void set_cc(uint8_t n, int z, int c, int v) {
+static void set_cc(uint8_t n, int z, int c, int v) {
     Word curr_psr = get_psr_reg();
 
     if (n != CC_UNMOD) curr_psr = n ? (1 << 31) | curr_psr : ~(1 << 31) & curr_psr;
@@ -271,7 +283,7 @@ static inline void set_cc(uint8_t n, int z, int c, int v) {
     set_psr_reg(curr_psr);
 }
 
-static inline bool eval_cond(uint8_t opcode) {
+static bool eval_cond(uint8_t opcode) {
     switch (opcode) {
     case 0x0: return get_cc(Z);
     case 0x1: return !get_cc(Z);
@@ -291,7 +303,7 @@ static inline bool eval_cond(uint8_t opcode) {
     }
 }
 
-static inline Word get_reg(uint8_t reg_id) {
+static __attribute__((always_inline)) Word get_reg(uint8_t reg_id) {
     switch (reg_id) {
     case 0x0: return cpu->registers.r0;
     case 0x1: return cpu->registers.r1;
@@ -346,7 +358,7 @@ static inline Word get_reg(uint8_t reg_id) {
     }
 }
 
-static inline void set_reg(uint8_t reg_id, Word val) {
+static __attribute__((always_inline)) void set_reg(uint8_t reg_id, Word val) {
     switch (reg_id) {
     case 0x0:
         cpu->registers.r0 = val;
@@ -460,12 +472,12 @@ static inline void set_reg(uint8_t reg_id, Word val) {
         }
         break;
     case 0xF:
-        cpu->registers.r15 = val;
+        PC_UPDATE(val);
         break;
     }
 }
 
-static __attribute__((always_inline)) Word fetch() {
+static Word fetch() {
     Word instr;
 
     if (THUMB_ACTIVATED) {
@@ -479,7 +491,7 @@ static __attribute__((always_inline)) Word fetch() {
     return instr;
 }
 
-static __attribute__((always_inline)) InstrType decode(Word instr) {
+static InstrType decode(Word instr) {
     cpu->pipeline = fetch();
 
     if (THUMB_ACTIVATED) {
@@ -668,7 +680,7 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
             int32_t offset = (instr & 0xFFFFFF) << 8;
 
             if (with_link & !THUMB_ACTIVATED) set_reg(0xE, cpu->registers.r15 - 4);
-            cpu->registers.r15 += (offset >> 8) * 4;
+            cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + ((offset >> 8) * 4));
 
             DEBUG_PRINT(("B%s%s #0x%X\n", with_link ? "L" : "", cond_to_cstr(cond), cpu->registers.r15))
             break;
@@ -685,10 +697,10 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
                     // change mode to THUMB 
                     cpu->registers.cpsr |= 0x20;
                     // align to 16-bit THUMB instructions
-                    cpu->registers.r15 = rn_val & ~0x1; 
+                    cpu->registers.r15 = PC_UPDATE(rn_val & ~0x1);
                 } else {
                     // continue in ARM so align to 32-bit ARM instructions
-                    cpu->registers.r15 = rn_val & ~0x3; 
+                    cpu->registers.r15 = PC_UPDATE(rn_val & ~0x3); 
                 }
                 break;
             case 0x3:
@@ -1084,7 +1096,7 @@ static int arm_exec_instr(uint32_t instr, InstrType type) {
             cpu->registers.r14_svc = cpu->registers.r15 - 4; // LR set to the instruction following SWI (PC + 4) (note: r15 always PC + 8)
             cpu->registers.spsr_svc = cpu->registers.cpsr;
             SET_PROCESSOR_MODE(Supervisor)
-            cpu->registers.r15 = 0x00000008;
+            cpu->registers.r15 = PC_UPDATE(0x00000008);
             break;
         case Multiply: { // NOTE: no halfword multiply instructions for GBA
             Bit s = (instr >> 20) & 1;
@@ -1350,10 +1362,32 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             set_reg(rd, result);
             break;
         }
+        case 0x2: {
+            DEBUG_PRINT(("LSL "))
+            uint8_t shift_amount = rs_val && 0x0FF;
+            Word result = shift_amount > 31 ? 0 : rd_val << shift_amount;
+            set_cc(result >> 31, result == 0, shift_amount == 0 ? CC_UNMOD : (rd_val << (shift_amount - 1)) >> 31, CC_UNMOD);
+            set_reg(rd, result);
+            break;
+        }
+        case 0x7: {
+            DEBUG_PRINT(("ROR "))
+            uint8_t shift_amount = rs_val & 0x0FF;
+            Word result = ROR(rd_val, shift_amount);
+            // set_reg(result)
+            set_reg(rd, result);
+        }
         case 0x8: {
             DEBUG_PRINT(("TST "))
             Word result = rd_val & rs_val;
             set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            break;
+        }
+        case 0x9: {
+            DEBUG_PRINT(("NEG "))
+            Word result = -rs_val;
+            set_cc(result >> 31, result == 0, rs_val <= 0, CC_UNMOD); // TODO: FIX V FLAG
+            set_reg(rd, result);
             break;
         }
         case 0xA: {
@@ -1381,6 +1415,13 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             Word result = rd_val & ~rs_val;
             set_reg(rd, result);
             set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            break;
+        }
+        case 0xF: {
+            DEBUG_PRINT(("MVN "))
+            Word result = ~rs_val;
+            set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
+            set_reg(rd, result);
             break;
         }
         default:
@@ -1423,10 +1464,10 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             if (!(rs_val & 0x1)) { // switch mode to ARM if rs bit 0 unset
                 cpu->registers.cpsr =  ~(1 << 5) & cpu->registers.cpsr;
                 // mask bit 1 since we need word alignment for ARM 32-bit instructions and bit 0 is already 0
-                cpu->registers.r15 = rs_val & ~0x2;
+                cpu->registers.r15 = PC_UPDATE(rs_val & ~0x2);
             } else {
                 // mask bit 0 since we need half-word alignment for THUMB 16-bit instructions
-                cpu->registers.r15 = rs_val & ~0x1;
+                cpu->registers.r15 = PC_UPDATE(rs_val & ~0x1);
             }
             break;
         }
@@ -1434,9 +1475,9 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
     }
     case THUMB_6: {
         uint8_t rd = (instr >> 8) & 0x7;
-        uint16_t nn = (instr & 0xFF) * 4;
+        uint16_t nn = (instr & 0xFF) << 2; // 10-bit unsigned immediate offset
         DEBUG_PRINT(("LDR %s, [PC, #0x%X]\n", register_to_cstr(rd), nn))
-        set_reg(rd, read_mem(cpu->mem, (cpu->registers.r15 & ~2) + nn, WORD_ACCESS));
+        set_reg(rd, read_mem(cpu->mem, (cpu->registers.r15 & ~0x2) + nn, WORD_ACCESS));
         break;
     }
     case THUMB_7: {
@@ -1444,7 +1485,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         uint8_t rb = (instr >> 3) & 0x7;
         uint8_t rd = instr & 0x7;
 
-        Word addr = get_reg(rb) + get_reg(rd);
+        Word addr = get_reg(rb) + get_reg(ro);
 
         switch ((instr >> 10) & 0x3) {
         case 0x0:
@@ -1466,6 +1507,9 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         }
 
         DEBUG_PRINT(("%s, [%s, %s]\n", rd, rb, ro))
+
+        printf("%08X\n", cpu->registers.r15 - 4);
+        exit(1);
         break;
     }
     case THUMB_8: {
@@ -1618,7 +1662,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
 
             // last popped value assigned to PC
             if (pc_or_lr) {
-                cpu->registers.r15 = read_mem(cpu->mem, get_reg(0xD), WORD_ACCESS);
+                cpu->registers.r15 = PC_UPDATE(read_mem(cpu->mem, get_reg(0xD), WORD_ACCESS));
                 set_reg(0xD, get_reg(0xD) + WORD_ACCESS);
             }
 
@@ -1664,7 +1708,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         uint8_t cond = (instr >> 8) & 0xF;
         int32_t offset = (int32_t)(int8_t)(instr & 0xFF) * 2;
         if (eval_cond(cond)) {
-            cpu->registers.r15 += offset;
+            cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + offset);
             DEBUG_PRINT(("B%s #0x%X", cond_to_cstr(cond), cpu->registers.r15))
         }
         DEBUG_PRINT(("\n"))
@@ -1677,7 +1721,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
     case THUMB_18: {
         // 11 bit signed offset (step 2) and sign extension at bit 10
         int16_t offset = (int16_t)(((instr & 0x7FF) * 2) << 5) >> 5; 
-        cpu->registers.r15 += offset;
+        cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + offset);
         DEBUG_PRINT(("B #0x%X\n", cpu->registers.r15))
         break;
     }
@@ -1690,7 +1734,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         offset_high = (int32_t)(offset_high << 21) >> 21; 
 
         cpu->registers.r14 = cpu->registers.r15 | 1;
-        cpu->registers.r15 = cpu->registers.r15 + (offset_high << 12) + (offset_low << 1);
+        cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + (offset_high << 12) + (offset_low << 1));
 
         switch ((cpu->pipeline >> 11) & 0x1F) {
         case 0b11111:
@@ -1711,25 +1755,21 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
     return 1;
 }
 
-static __attribute__((always_inline)) int execute(Word instr, InstrType type) {
-    int32_t original_pc = cpu->registers.r15;
-    int cycles = 0;
+static size_t execute(Word instr, InstrType type) {
+    size_t cpi = 0;
 
     if (THUMB_ACTIVATED) {
         DEBUG_PRINT(("[THUMB] (%08X) %04X ", cpu->registers.r15 - 4, instr))
-        cycles = thumb_exec_instr(instr, type);
+        cpi = thumb_exec_instr(instr, type);
     } else {
         DEBUG_PRINT(("[ARM] (%08X) %08X ", cpu->registers.r15 - 8, instr))
-        cycles = arm_exec_instr(instr, type);
+        cpi = arm_exec_instr(instr, type);
     }
-
-    // will force pipeline flush if r15 is modified in execute stage
-    if (cpu->registers.r15 != original_pc) cpu->pipeline = 0;
 
     return 1;
 }
 
-static __attribute__((always_inline)) int tick_cpu(void) {
+static size_t tick_cpu(void) {
     Word instr = cpu->pipeline ? cpu->pipeline : fetch();
     InstrType type;
 
@@ -1768,18 +1808,17 @@ void init_GBA(const char *rom_file, const char *bios_file) {
 uint16_t* compute_frame(uint16_t key_input) {
     cpu->mem->reg_keyinput = key_input;
 
-    int total_cycles = 0;
-    while (total_cycles < 280896) {
-        // if (cpu->registers.r15 == 0x08000BBC) {
-        //     print_dump();
-        //     exit(1);
-        // }
-
-        int cycles = tick_cpu();
-        for (int j = 0; j < cycles; j++) {
+    size_t cycles = 0;
+    while (cycles < CYCLES_PER_FRAME) {
+        if (cpu->registers.r15 == 0x080040B0) {
+            print_dump();
+            exit(1);
+        }
+        size_t cpi = tick_cpu();
+        for (int j = 0; j < cpi; j++) {
             tick_ppu();
         }
-        total_cycles += cycles;
+        cycles += cpi;
     }
 
     return frame;
