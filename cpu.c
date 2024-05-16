@@ -735,9 +735,23 @@ static int arm_block_data_transfer(Bit l) {
     uint8_t rn = (cpu->curr_instr >> 16) & 0xF;
     uint16_t reg_list = cpu->curr_instr & 0xFFFF;
 
+    DEBUG_PRINT(("%s%s%s %s, { ", l ? "LDM" : "STM", amod_to_cstr(p, u), cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), register_to_cstr(rn)))
+
     Word base_addr = get_reg(rn);
     bool r15_transferred = (reg_list >> 0xF) & 1; // works in conjunction with s bit for special cases (see below)
-    bool on_first_load = true; // after the first load if writeback enabled the value is computed and written back to the base_addr register
+
+    // in the case of a bank transfer this will store the old cpsr value
+    // and will switch modes for this instruction alone
+    Word user_bank_transfer = 0;
+
+    if (s) {
+        if (l && r15_transferred) {
+            cpu->registers.cpsr = get_psr_reg();
+        } else {
+            user_bank_transfer = cpu->registers.cpsr;
+            cpu->registers.cpsr = (cpu->registers.cpsr & ~0xFF) | User;
+        }
+    }
 
     // (?) calculate the final writeback value and write back to base register before transfers occur
     int total_transfers = __builtin_popcount(reg_list);
@@ -746,36 +760,41 @@ static int arm_block_data_transfer(Bit l) {
         set_reg(rn, writeback_val);
     }
 
+    // bit of a hack due to this implementation: internally, transfers will always happen in order from r0-r15
+    // although for simplicity I'm iterating in the direction of the addressing mode (incrementing/decrementing)
+    // and manually checking the STM edge case condition (see below) and create a copy of the base registers value
+    uint8_t first_transferred_reg = __builtin_ffs(reg_list) - 1;
+    Word base_addr_copy = base_addr;
+
     // r0 (or the first transferred register from the file) should be transferred 
     // to/from the lowest address location out of the entire register file
-    for (int reg = u ? 0x0 : 0xF; reg != (u ? 0xF : 0x0); u ? reg++ : reg--) {
+    for (int reg = u ? 0x0 : 0xF; reg != (u ? 0xF : -1); u ? reg++ : reg--) {
         bool should_transfer = (reg_list >> reg) & 1;
 
         if (should_transfer) {
             Word addr = p ? u ? base_addr + WORD_ACCESS : base_addr - WORD_ACCESS : base_addr;
 
-            if (w)
-                base_addr = u ? base_addr + WORD_ACCESS : base_addr - WORD_ACCESS;
-
             if (l) {
                 set_reg(reg, read_mem(cpu->mem, addr, WORD_ACCESS)); // LDM
             } else {
-                write_mem(cpu->mem, addr, get_reg(reg) + (reg == 0xF ? 4 : 0), WORD_ACCESS); // STM
+                // if r15 is used in register list, stored value is PC + 12 (r15 + 4)
+                Word stored_value = get_reg(reg) + (reg == 0xF ? 4 : 0);
+                // A STM which includes storing the base, with the base as the first register to be stored, 
+                // will therefore store the unchanged value, whereas with the base second or later 
+                // in the transfer order, will store the modified value.
+                write_mem(cpu->mem, addr, (reg == rn && rn == first_transferred_reg) ? base_addr_copy : stored_value, WORD_ACCESS); // STM
             }
+
+            if (w)
+                base_addr = u ? base_addr + WORD_ACCESS : base_addr - WORD_ACCESS;
 
             DEBUG_PRINT(("%s ", register_to_cstr(reg)))
         }
     }
     DEBUG_PRINT(("}\n"))
 
-    if (r15_transferred) {
-        if (s) {
-            printf("SPECIAL CASE LDM\n");
-            exit(1);
-        } else {
-            cpu->registers.cpsr = get_psr_reg();
-        }
-    }
+    if (user_bank_transfer) 
+        cpu->registers.cpsr = user_bank_transfer;
 
     return 1;
 }
@@ -1814,12 +1833,6 @@ uint16_t* compute_frame(uint16_t key_input) {
 
     size_t cycles = 0;
     while (cycles < CYCLES_PER_FRAME) {
-        // // SOLID STATE CONTINUE BEYOND THIS
-        // if (cpu->registers.r15 == 0x08001CA4) {
-        //     print_dump();
-        //     exit(1);
-        // }
-
         size_t cpi = tick_cpu();
         for (int j = 0; j < cpi; j++) {
             tick_ppu();
