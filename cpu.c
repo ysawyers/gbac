@@ -66,7 +66,7 @@ typedef enum {
     Multiply,
     SoftwareInterrupt,
     SingleDataSwap,
-    ALU,
+    DataProcessing,
     MSR,
     MRS,
     SWP,
@@ -606,7 +606,7 @@ static InstrType decode(Word instr) {
                         return MSR;
                     return MRS;
                 };
-            default: return ALU;
+            default: return DataProcessing;
         }
     }
 }
@@ -800,6 +800,118 @@ static int arm_block_data_transfer(Bit l) {
     return 1;
 }
 
+static int arm_alu(uint8_t opcode, uint8_t rd, uint8_t rn, Word operand_1, Word operand_2, Bit s) {
+    if (s && rd == 0xF) {
+        printf("HANDLE s && rd == 0xF\n");
+        exit(1);
+    }
+
+    switch (opcode) {
+    case 0x0: {
+        DEBUG_PRINT(("AND%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
+        Word result = operand_1 & operand_2;
+        if (s)
+            set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+        set_reg(rd, result);
+        break;
+    }
+    case 0x1: {
+        DEBUG_PRINT(("EOR%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
+        Word result = operand_1 ^ operand_2;
+        if (s)
+            set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+        set_reg(rd, result);
+        break;
+    }
+    case 0x2: {
+        DEBUG_PRINT(("SUB%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
+        Word result = operand_1 - operand_2;
+        if (s)
+            set_cc(result >> 31, result == 0, operand_1 >= operand_2, ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
+        set_reg(rd, result);
+        break;
+    }
+    case 0x3: {
+        printf("IMPLEMENT RSB!\n");
+        exit(1);
+        break;
+    }
+    case 0x4: {
+        DEBUG_PRINT(("ADD%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
+        Word result = operand_1 + operand_2;
+        if (s)
+            set_cc(result >> 31, result == 0, ((operand_1 >> 31) + (operand_2 >> 31) > (result >> 31)), ((operand_1 >> 31) == (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
+        set_reg(rd, result);
+        break;
+    }
+    case 0x5: {
+        DEBUG_PRINT(("ADC%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
+        Word result = operand_1 + operand_2 + get_cc(C);
+        if (s)
+            set_cc(result >> 31, result == 0, ((operand_1 >> 31) + (operand_2 >> 31) > (result >> 31)), ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
+        set_reg(rd, result);
+        break;
+    }
+    case 0x7: { // RSC
+        Word temp = operand_1;
+        operand_1 = operand_2;
+        operand_2 = temp;
+    }
+    case 0x6: {
+        DEBUG_PRINT(("SBC%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
+        Word result = operand_1 - operand_2 - !get_cc(C);
+        if (s)
+            set_cc(result >> 31, result == 0, (uint64_t)operand_1 >= ((uint64_t)operand_2 + !get_cc(C)), ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
+        set_reg(rd, result);
+        break;
+    }
+    case 0x8: {
+        DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), register_to_cstr(rn), operand_2))
+        Word result = operand_1 & operand_2;
+        set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+        break;
+    }
+    case 0x9: {
+        DEBUG_PRINT(("TEQ%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), register_to_cstr(rn), operand_2))
+        Word result = operand_1 ^ operand_2;
+        set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+        break;
+    }
+    case 0xB: // CMN
+        operand_2 = -operand_2;
+    case 0xA: {
+        DEBUG_PRINT(("CMP%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), register_to_cstr(rn), operand_2))
+        Word result = operand_1 - operand_2;
+        set_cc(result >> 31, result == 0, operand_1 >= operand_2, ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
+        break;
+    }
+    case 0xC: {
+        DEBUG_PRINT(("ORR%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
+        Word result = operand_1 | operand_2;
+        if (s)
+            set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+        set_reg(rd, result);
+        break;
+    }
+    case 0xF: // MVN
+        operand_2 = ~operand_2;
+    case 0xD:
+        DEBUG_PRINT(("MOV%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rd), operand_2))
+        if (s) 
+            set_cc(operand_2 >> 31, operand_2 == 0, cpu->shifter_carry, CC_UNMOD);
+        set_reg(rd, operand_2);
+        break;
+    case 0xE: {
+        DEBUG_PRINT(("BIC%s%s %s, %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rn), operand_2))
+        Word result = operand_1 & ~operand_2;
+        if (s) 
+            set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
+        set_reg(rd, result);
+        break;
+    }
+    }
+}
+
 static int arm_exec_instr(Word instr, InstrType type) {
     uint8_t cond = ARM_INSTR_COND(instr);
 
@@ -807,28 +919,20 @@ static int arm_exec_instr(Word instr, InstrType type) {
         switch (type) {
         case Branch: return arm_branch();
         case BranchExchange: return arm_branch_exchange();
-        case BlockDataTransfer: return arm_block_data_transfer((cpu->curr_instr >> 20) & 1); // LDM instruction if set otherwise STM
-
-        case ALU: {
+        case BlockDataTransfer: return arm_block_data_transfer((cpu->curr_instr >> 20) & 1);
+        case DataProcessing: {
             Bit i = (instr >> 25) & 1;
             Bit s = (instr >> 20) & 1;
 
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
 
-            if (rd == 0xF && s) {
-                printf("THE P OPCODES!\n");
-                exit(1);
-            }
-
-            Word operand2;
-
-            // will be set to 4 if rn = r15 because returned value should be PC + 12 (r15 holds PC + 8)
-            Word rn_r15_offset = 0;
+            Word operand_1 = get_reg(rn);
+            Word operand_2;
 
             if (i) {
                 uint8_t shift_amount = ((instr & 0xF00) >> 8) * 2;
-                operand2 = barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, shift_amount, false);
+                operand_2 = barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, shift_amount, false);
             } else {
                 Bit r = (instr >> 4) & 1;
 
@@ -836,136 +940,17 @@ static int arm_exec_instr(Word instr, InstrType type) {
                 uint8_t rm = instr & 0xF;
 
                 if (r) {
-                    // will be set to 4 if rm = r15 because returned value should be PC + 12 (r15 holds PC + 8)
-                    Word rm_r15_offset = 0;
-                    if (rn == 0xF) rn_r15_offset = 4;
-                    if (rm == 0xF) rm_r15_offset = 4;
-
+                    if (rn == 0xF) 
+                        operand_1 += 4;
                     uint8_t shift_amount = get_reg((instr >> 8) & 0xF) & 0xFF;
-                    operand2 = barrel_shifter(shift_type, get_reg(rm) + rm_r15_offset, shift_amount, false);
+                    operand_2 = barrel_shifter(shift_type, get_reg(rm) + (rm == 0xF ? 4 : 0), shift_amount, false);
                 } else {
                     uint8_t shift_amount = (instr >> 7) & 0x1F;
-                    operand2 = barrel_shifter(shift_type, get_reg(rm), shift_amount, true);
+                    operand_2 = barrel_shifter(shift_type, get_reg(rm), shift_amount, true);
                 }
             }
 
-            Word rn_val = get_reg(rn) + rn_r15_offset;
-
-            switch ((instr >> 21) & 0xF) {
-            case 0x0: {
-                DEBUG_PRINT(("AND%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = rn_val & operand2;
-                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, result);
-                break;
-            }
-            case 0x1: {
-                DEBUG_PRINT(("EOR%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = rn_val ^ operand2;
-                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, result);
-                break;
-            }
-            case 0x2: {
-                DEBUG_PRINT(("SUB%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1);
-                int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1);
-                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                set_reg(rd, unsigned_result);
-                break;
-            }
-            case 0x3: { // TODO: BROKEN
-                DEBUG_PRINT(("RSB%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                printf("RSB: %08X\n", cpu->registers.r15);
-                print_dump();
-                exit(1);
-                break;
-            }
-            case 0x4: {
-                DEBUG_PRINT(("ADD%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2;
-                int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2;
-                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                set_reg(rd, unsigned_result);
-                break;
-            }
-            case 0x5: {
-                DEBUG_PRINT(("ADC%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2 + (uint64_t)get_cc(C);
-                int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2 + (int64_t)get_cc(C);
-                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                set_reg(rd, unsigned_result);
-                break;
-            }
-            case 0x6: { // FIX: REVISIT
-                DEBUG_PRINT(("SBC%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                uint32_t result = rn_val - operand2 - !get_cc(C);
-                if (s) set_cc(result >> 31, result == 0, (uint64_t)rn_val >= (uint64_t)operand2 + (uint64_t)!get_cc(C), ((rn_val>>31) != (operand2>>31)) && ((rn_val>>31) != (result>>31)));
-                set_reg(rd, result);
-                break;
-            }
-            case 0x7: { // TODO: BROKEN
-                DEBUG_PRINT(("RSC%s%s %s, %s, #0x%X\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)operand2 + ((uint64_t)~rn_val + (uint64_t)1) + ((uint64_t)get_cc(C) - 1);
-                int64_t signed_result = (int64_t)(int32_t)operand2 + ((int64_t)(int32_t)~rn_val + (int64_t)1) + ((int64_t)get_cc(C) - 1);
-                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, operand2 >= rn_val, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                set_reg(rd, unsigned_result);
-                break;
-            }
-            case 0x8: {
-                DEBUG_PRINT(("TST%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = rn_val & operand2;
-                set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                break;
-            }
-            case 0x9: {
-                DEBUG_PRINT(("TEQ%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                Word result = rn_val ^ operand2;
-                set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                break;
-            }
-            case 0xA: {
-                DEBUG_PRINT(("CMP%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)rn_val + ((uint64_t)~operand2 + (uint64_t)1);
-                int64_t signed_result = (int64_t)(int32_t)rn_val + ((int64_t)(int32_t)~operand2 + (int64_t)1);
-                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, rn_val >= operand2, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                break;
-            }
-            case 0xB: {
-                DEBUG_PRINT(("CMN%s %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rn), operand2))
-                uint64_t unsigned_result = (uint64_t)rn_val + (uint64_t)operand2;
-                int64_t signed_result = (int64_t)(int32_t)rn_val + (int64_t)(int32_t)operand2;
-                if (s) set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, unsigned_result > UINT32_MAX, signed_result > INT32_MAX || signed_result < INT32_MIN);
-                break;
-            }
-            case 0xC: {
-                DEBUG_PRINT(("ORR%s %s, %s, #0x%X\n", cond_to_cstr(cond), register_to_cstr(rd), register_to_cstr(rn), operand2))
-                Word result = rn_val | operand2;
-                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, result);
-                break;
-            }
-            case 0xD: {
-                DEBUG_PRINT(("MOV%s%s %s, #0x%X\n", cond_to_cstr(cond), s ? "S" : "", register_to_cstr(rd), operand2))
-                if (s) set_cc(operand2 >> 31, operand2 == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, operand2);
-                break;
-            }
-            case 0xE: {
-                DEBUG_PRINT(("BIC%s%s %s, %s, #0x%X\n", cond_to_cstr(instr), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rn), operand2))
-                Word result = rn_val & ~operand2;
-                if (s) set_cc(result >> 31, result == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, result);
-                break;
-            }
-            case 0xF: {
-                DEBUG_PRINT(("MVN%s%s %s, #0x%X\n", cond_to_cstr(cond), s ? "S" : "", register_to_cstr(rd), operand2))
-                operand2 = ~operand2;
-                if (s) set_cc(operand2 >> 31, operand2 == 0, cpu->shifter_carry, CC_UNMOD);
-                set_reg(rd, operand2);
-                break;
-            }
-            }
+            arm_alu((instr >> 21) & 0xF, rd, rn, operand_1, operand_2, s);
             break;
         }
         case HalfwordDataTransfer: {
