@@ -3,6 +3,9 @@
 #include <string.h>
 #include "memory.h"
 
+// https://gbadev.net/gbadoc/memory.html
+// for more detail into the memory regions / mappings
+
 // ARM does not support misaligned addresses
 // https://problemkaputt.de/gbatek.htm#armcpumemoryalignments
 #define FORCE_MEMORY_ALIGN(addr, access_size) switch (access_size) { \
@@ -62,6 +65,11 @@ uint32_t read_mem(Memory *mem, uint32_t addr, size_t access_size) {
 
     switch (addr) {
     case 0x04000130: return mem->reg_keyinput;
+    default:
+        if (addr >= 0x040000060 && addr <= 0x04000300) {
+            printf("read to unmapped reg: %08X\n", addr);
+            exit(1);
+        }
     }
 
     if (addr <= 0x00003FFF) {
@@ -89,6 +97,11 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
     case 0x04000208:
         memcpy(&mem->reg_ime, &val, access_size);
         return;
+    default:
+        if (addr >= 0x040000060 && addr <= 0x04000300) {
+            printf("write to umapped reg: %08X\n", addr);
+            exit(1);
+        }
     }
 
     if (addr >= 0x02000000 && addr <= 0x02FFFFFF) {
@@ -100,6 +113,14 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
     } else if (addr >= 0x05000000 && addr <= 0x5FFFFFF) {
         memcpy(pallete_ram + ((addr - 0x05000000) % 0x400), &val, access_size);
     } else if (addr >= 0x06000000 && addr <= 0x06FFFFFF) {
-        memcpy(vram + ((addr - 0x06000000) % 0x20000), &val, access_size);
+        // exit(1);
+        // printf("[%08X]: %08X\n", addr, val);
+
+        addr = (addr - 0x06000000) % 0x20000;
+        if (addr >= 0x18000 && addr <= 0x1FFFF) {
+            memcpy(vram + (addr - 0x8000), &val, access_size);
+        } else {
+            memcpy(vram + addr, &val, access_size);
+        }
     }
 }
