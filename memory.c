@@ -80,6 +80,8 @@ uint32_t read_mem(Memory *mem, uint32_t addr, size_t access_size) {
         memcpy(&word, mem->internal_wram + ((addr - 0x03000000) % 0x8000), access_size);
     } else if (addr >= 0x04000000 && addr <= 0x04000054) {
         return ppu_read_register(addr);
+    } else if (addr >= 0x07000000 && addr <= 0x07FFFFFF) {
+        memcpy(&word, oam + ((addr - 0x07000000) & 0x400), access_size);
     } else if (addr >= 0x08000000 && addr <= 0x81FFFFFF) {
         memcpy(&word, mem->rom + (addr - 0x08000000), access_size);
     } else {
@@ -113,9 +115,6 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
     } else if (addr >= 0x05000000 && addr <= 0x5FFFFFF) {
         memcpy(pallete_ram + ((addr - 0x05000000) % 0x400), &val, access_size);
     } else if (addr >= 0x06000000 && addr <= 0x06FFFFFF) {
-        // exit(1);
-        // printf("[%08X]: %08X\n", addr, val);
-
         addr = (addr - 0x06000000) % 0x20000;
         if (addr >= 0x18000 && addr <= 0x1FFFF) {
             memcpy(vram + (addr - 0x8000), &val, access_size);
