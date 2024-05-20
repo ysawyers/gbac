@@ -25,6 +25,7 @@ typedef enum {
     MSR,
     MRS,
     SWP,
+    NOP,
 
     THUMB_1,
     THUMB_2,

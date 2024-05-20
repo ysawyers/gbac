@@ -13,6 +13,8 @@
     "vector": "c",
     "bitset": "c",
     "__locale": "c",
-    "memory.h": "c"
+    "memory.h": "c",
+    "decompressor.h": "c",
+    "stdlib.h": "c"
   }
 }

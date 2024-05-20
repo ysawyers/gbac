@@ -452,13 +452,13 @@ static InstrType decode(Word instr) {
         switch ((instr >> 13) & 0x7) {
         case 0x0:
             if (((instr >> 11) & 0x3) == 0x3) 
-                return THUMB_2;
-            return THUMB_1;
-        case 0x1: return THUMB_3;
+                return thumb_decompress_2(instr, &cpu->curr_instr);
+            return thumb_decompress_1(instr, &cpu->curr_instr);
+        case 0x1: return thumb_decompress_3(instr, &cpu->curr_instr);
         case 0x2:
             switch ((instr >> 10) & 0x7) {
             case 0x0: return thumb_decompress_4(instr, &cpu->curr_instr);
-            case 0x1: return THUMB_5;
+            case 0x1: return thumb_decompress_5(instr, &cpu->curr_instr);
             case 0x2:
             case 0x3: return THUMB_6;
             }
@@ -487,12 +487,12 @@ static InstrType decode(Word instr) {
                     fprintf(stderr, "CPU Error [THUMB]: debugging not supported!\n");
                     exit(1);
                 }
-                return THUMB_16;
+                return thumb_decompress_16(instr, &cpu->curr_instr);
             }
         case 0x7:
             if ((instr >> 12) & 1)
                 return THUMB_19;
-            return THUMB_18;
+            return thumb_decompress_18(instr, &cpu->curr_instr);
         default: return THUMB_BAD_INSTR;
         }
     } else {
@@ -630,8 +630,12 @@ static int arm_branch() {
     Bit with_link = (cpu->curr_instr >> 24) & 1;
     int32_t offset = ((int32_t)((cpu->curr_instr & 0xFFFFFF) << 8) >> 8) << 2; // sign extended 24-bit offset shifted left by 2
 
-    if (with_link)
+    // adjust for step by 2 instead of 4 for translated THUMB immediates
+    if (THUMB_ACTIVATED) offset >>= 1;
+
+    if (with_link) 
         set_reg(LR_REG, cpu->registers.r15 - 4);
+        
     cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + offset);
 
     DEBUG_PRINT(("B%s%s #0x%X\n", with_link ? "L" : "", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), cpu->registers.r15))
@@ -644,10 +648,11 @@ static int arm_branch_exchange() {
 
     switch ((cpu->curr_instr >> 4) & 0xF) {
     case 0x1:
-        if ((rn_val & 1) && !THUMB_ACTIVATED) {
-            cpu->registers.cpsr |= 0x20; // set thumb state indicator
+        if (rn_val & 1) {
+            cpu->registers.cpsr |= 0x20; // toggle THUMB
             cpu->registers.r15 = PC_UPDATE(rn_val & ~0x1); // aligns to halfword boundary
         } else {
+            cpu->registers.cpsr &= ~(1 << 5); // toggle ARM
             cpu->registers.r15 = PC_UPDATE(rn_val & ~0x3); // aligns to word boundary
         }
 
@@ -739,7 +744,7 @@ static int arm_block_data_transfer(Bit l) {
     return 1;
 }
 
-static int arm_alu(uint8_t opcode, uint8_t rd, uint8_t rn, Word operand_1, Word operand_2, Bit s) {
+static void arm_alu(uint8_t opcode, uint8_t rd, uint8_t rn, Word operand_1, Word operand_2, Bit s) {
     switch (opcode) {
     case 0x0: {
         DEBUG_PRINT(("AND%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
@@ -782,7 +787,7 @@ static int arm_alu(uint8_t opcode, uint8_t rd, uint8_t rn, Word operand_1, Word 
         DEBUG_PRINT(("ADC%s%s %s, #0x%X\n", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), operand_2))
         Word result = operand_1 + operand_2 + get_cc(C);
         if (s)
-            set_cc(result >> 31, result == 0, ((operand_1 >> 31) + (operand_2 >> 31) > (result >> 31)), ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
+            set_cc(result >> 31, result == 0, ((operand_1 >> 31) + (operand_2 >> 31) > (result >> 31)), ((operand_1 >> 31) == (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
         set_reg(rd, result);
         break;
     }
@@ -855,12 +860,11 @@ static int arm_alu(uint8_t opcode, uint8_t rd, uint8_t rn, Word operand_1, Word 
         case System:
             printf("unpredictable\n");
             exit(1);
+            break;
         default:
             cpu->registers.cpsr = get_psr_reg();
         }
     }
-
-    return 1;
 }
 
 static int arm_exec_instr(Word instr, InstrType type) {
@@ -868,6 +872,7 @@ static int arm_exec_instr(Word instr, InstrType type) {
 
     if (eval_cond(cond)) {
         switch (type) {
+        case NOP: return 1;
         case Branch: return arm_branch();
         case BranchExchange: return arm_branch_exchange();
         case BlockDataTransfer: return arm_block_data_transfer((cpu->curr_instr >> 20) & 1);
@@ -901,7 +906,8 @@ static int arm_exec_instr(Word instr, InstrType type) {
                 }
             }
 
-            return arm_alu((instr >> 21) & 0xF, rd, rn, operand_1, operand_2, s);
+            arm_alu((instr >> 21) & 0xF, rd, rn, operand_1, operand_2, s);
+            return 1;
         }
         case HalfwordDataTransfer: {
             Bit p = (instr >> 24) & 1;
@@ -1133,6 +1139,7 @@ static int arm_exec_instr(Word instr, InstrType type) {
             Word operand = i ? ROR(instr & 0xFF, ((instr >> 8) & 0xF) * 2)
                 : get_reg(instr & 0xF);
 
+            // bits 8-23 are reserved and cannot be modified with these instructions
             if (psr) {
                 DEBUG_PRINT(("spsr_%s, ", processor_mode_to_cstr(PROCESSOR_MODE)))
                 if (f) set_psr_reg((get_psr_reg() & 0x00FFFFFF) | (operand & 0xFF000000));
@@ -1197,157 +1204,6 @@ static int arm_exec_instr(Word instr, InstrType type) {
 
 static int thumb_exec_instr(uint16_t instr, InstrType type) {
     switch (type) {
-    case THUMB_1: {
-        uint8_t opcode = (instr >> 11) & 0x3;
-        uint8_t rs = (instr >> 3) & 0x7;
-        uint8_t rd = instr & 0x7;
-
-        uint8_t shift_amount = (instr >> 6) & 0x1F;
-        Word operand_2 = barrel_shifter(opcode, get_reg(rs), shift_amount, true);
-
-        set_reg(rd, operand_2);
-        set_cc(operand_2 >> 31, operand_2 == 0, cpu->shifter_carry, CC_UNMOD);
-
-        switch (opcode) {
-        case 0x0:
-            DEBUG_PRINT(("LSLS "))
-            break;
-        case 0x1:
-            DEBUG_PRINT(("LSRS "))
-            break;
-        case 0x2:
-            DEBUG_PRINT(("ASRS "))
-            break;
-        }
-        DEBUG_PRINT(("%s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), shift_amount))
-        break;
-    }
-    case THUMB_2: {
-        uint8_t rn_or_imm = (instr >> 6) & 0x7;
-        uint8_t rs = (instr >> 3) & 0x7;
-        uint8_t rd = instr & 0x7;
-
-        Word rs_val = get_reg(rs);
-
-        switch ((instr >> 9) & 0x3) {
-        case 0x0: {
-            DEBUG_PRINT(("ADDS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
-            Word operand_1 = rs_val;
-            Word operand_2 = get_reg(rn_or_imm);
-            Word result = operand_1 + operand_2;
-            set_cc(result >> 31, result == 0, ((operand_1 >> 31) + (operand_2 >> 31) > (result >> 31)), ((operand_1 >> 31) == (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
-            set_reg(rd, result);
-            break;
-        }
-        case 0x1: {
-            DEBUG_PRINT(("SUBS %s, %s, %s\n", register_to_cstr(rd), register_to_cstr(rs), register_to_cstr(rn_or_imm)))
-            Word operand_1 = rs_val;
-            Word operand_2 = get_reg(rn_or_imm);
-            Word result = operand_1 - operand_2;
-            set_cc(result >> 31, result == 0, operand_1 >= operand_2, ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
-            set_reg(rd, result);
-            break;
-        }
-        case 0x2: {
-            DEBUG_PRINT(("ADDS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm))
-            Word operand_1 = rs_val;
-            Word operand_2 = rn_or_imm;
-            Word result = operand_1 + operand_2;
-            set_cc(result >> 31, result == 0, ((operand_1 >> 31) + (operand_2 >> 31) > (result >> 31)), ((operand_1 >> 31) == (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
-            set_reg(rd, result);
-            break;
-        }
-        case 0x3: {
-            DEBUG_PRINT(("SUBS %s, %s, #0x%X\n", register_to_cstr(rd), register_to_cstr(rs), rn_or_imm))
-            Word operand_1 = rs_val;
-            Word operand_2 = rn_or_imm;
-            Word result = operand_1 - operand_2;
-            set_cc(result >> 31, result == 0, operand_1 >= operand_2, ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
-            set_reg(rd, result);
-            break;
-        }
-        }
-        break;
-    }
-    case THUMB_3: {
-        uint8_t opcode = (instr >> 11) & 0x3;
-
-        uint8_t rd = (instr >> 8) & 0x7;
-        uint8_t nn = instr & 0xFF;
-
-        Word rd_val = get_reg(rd);
-
-        switch (opcode) {
-        case 0x0:
-            DEBUG_PRINT(("MOVS %s, #0x%X\n", register_to_cstr(rd), nn))
-            set_reg(rd, nn);
-            set_cc(CC_UNSET, nn == 0, CC_UNMOD, CC_UNMOD);
-            break;
-        case 0x1: {
-            DEBUG_PRINT(("CMPS %s, #0x%X\n", register_to_cstr(rd), nn))
-            Word operand_1 = rd_val;
-            Word operand_2 = nn;
-            Word result = operand_1 - operand_2;
-            set_cc(result >> 31, result == 0, operand_1 >= operand_2, ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
-            break;
-        }
-        case 0x2: {
-            DEBUG_PRINT(("ADDS %s, #0x%X\n", register_to_cstr(rd), nn))
-            Word operand_1 = rd_val;
-            Word operand_2 = nn;
-            Word result = operand_1 + operand_2;
-            set_cc(result >> 31, result == 0, ((operand_1 >> 31) + (operand_2 >> 31) > (result >> 31)), ((operand_1 >> 31) == (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
-            set_reg(rd, result);
-            break;
-        }
-        case 0x3: {
-            DEBUG_PRINT(("SUBS %s, #0x%X\n", register_to_cstr(rd), nn))
-            Word operand_1 = rd_val;
-            Word operand_2 = nn;
-            Word result = operand_1 - operand_2;
-            set_cc(result >> 31, result == 0, operand_1 >= operand_2, ((operand_1 >> 31) != (operand_2 >> 31)) && ((operand_1 >> 31) != (result >> 31)));
-            set_reg(rd, result);
-            break;
-        }
-        }
-        break;
-    }
-    case THUMB_5: {
-        uint8_t rs = (((instr >> 6) & 1) << 3) | ((instr >> 3) & 0x7); // MSBs added (r0-r15)
-        uint8_t rd = (((instr >> 7) & 1) << 3) | (instr & 0x7); // MSBd added (r0-r15)
-
-        Word rs_val = get_reg(rs);
-
-        switch ((instr >> 8) & 0x3) {
-        case 0x0:
-            DEBUG_PRINT(("ADD %s, %s\n", register_to_cstr(rd), register_to_cstr(rs)));
-            set_reg(rd, get_reg(rd) + rs_val);
-            break;
-        case 0x1: { // only CMP affects CPSR condition flags for this instruction
-            DEBUG_PRINT(("CMP %s, %s\n", register_to_cstr(rd), register_to_cstr(rs)));
-            uint64_t unsigned_result = (uint64_t)get_reg(rd) + ((uint64_t)~rs_val + (uint64_t)1);
-            int64_t signed_result = (int64_t)(int32_t)get_reg(rd) + ((int64_t)(int32_t)~rs_val + (int64_t)1);
-            set_cc((unsigned_result >> 31) & 1, (uint32_t)unsigned_result == 0, get_reg(rd) >= rs_val, signed_result > INT32_MAX || signed_result < INT32_MIN);
-            break;
-        }
-        case 0x2:
-            DEBUG_PRINT(("MOV %s, %s\n", register_to_cstr(rd), register_to_cstr(rs)))
-            set_reg(rd, get_reg(rs));
-            break;
-        case 0x3:
-            DEBUG_PRINT(("BX %s\n", register_to_cstr(rs)))
-            if (!(rs_val & 0x1)) { // switch mode to ARM if rs bit 0 unset
-                cpu->registers.cpsr =  ~(1 << 5) & cpu->registers.cpsr;
-                // mask bit 1 since we need word alignment for ARM 32-bit instructions and bit 0 is already 0
-                cpu->registers.r15 = PC_UPDATE(rs_val & ~0x2);
-            } else {
-                // mask bit 0 since we need half-word alignment for THUMB 16-bit instructions
-                cpu->registers.r15 = PC_UPDATE(rs_val & ~0x1);
-            }
-            break;
-        }
-        break;
-    }
     case THUMB_6: {
         uint8_t rd = (instr >> 8) & 0x7;
         uint16_t nn = (instr & 0xFF) << 2; // 10-bit unsigned immediate offset
@@ -1481,7 +1337,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         DEBUG_PRINT(("%s, [sp, #0x%X]\n", register_to_cstr(rd), nn))
         break;
     }
-    case THUMB_12: {
+    case THUMB_12: { // CANNOT TRANSLATE!
         uint8_t rd = (instr >> 8) & 0x7;
         uint8_t nn = (instr & 0xFF) * 4; // (0-1020, step 4)
 
@@ -1587,27 +1443,10 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         DEBUG_PRINT(("\n"))
         break;
     }
-    case THUMB_16: {
-        uint8_t cond = (instr >> 8) & 0xF;
-        int32_t offset = (int32_t)(int8_t)(instr & 0xFF) * 2;
-        if (eval_cond(cond)) {
-            cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + offset);
-            DEBUG_PRINT(("B%s #0x%X", cond_to_cstr(cond), cpu->registers.r15))
-        }
-        DEBUG_PRINT(("\n"))
-        break;
-    }
     case THUMB_17:
         printf("THUMB.17\n");
         exit(1);
         break;
-    case THUMB_18: {
-        // 11 bit signed offset (step 2) and sign extension at bit 10
-        int16_t offset = (int16_t)(((instr & 0x7FF) * 2) << 5) >> 5; 
-        cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + offset);
-        DEBUG_PRINT(("B #0x%X\n", cpu->registers.r15))
-        break;
-    }
     case THUMB_19: {
         uint32_t offset_high = instr & 0x7FF;
         // instruction is split between two 16-bit THUMB instructions
@@ -1642,10 +1481,6 @@ static size_t execute(Word instr, InstrType type) {
     size_t cpi = 0;
 
     switch (type) {
-    case THUMB_1:
-    case THUMB_2:
-    case THUMB_3:
-    case THUMB_5:
     case THUMB_6:
     case THUMB_7:
     case THUMB_8:
@@ -1656,9 +1491,7 @@ static size_t execute(Word instr, InstrType type) {
     case THUMB_13:
     case THUMB_14:
     case THUMB_15:
-    case THUMB_16:
     case THUMB_17:
-    case THUMB_18:
     case THUMB_19:
         DEBUG_PRINT(("[THUMB] (%08X) %04X ", cpu->registers.r15 - 4, cpu->curr_instr))
         cpi = thumb_exec_instr(cpu->curr_instr, type);
