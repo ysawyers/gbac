@@ -464,22 +464,22 @@ static InstrType decode(Word instr) {
             }
             if ((instr >> 9) & 1)
                 return THUMB_8;
-            return THUMB_7;
-        case 0x3: return THUMB_9;
+            return thumb_decompress_7(instr, &cpu->curr_instr);
+        case 0x3: return thumb_decompress_9(instr, &cpu->curr_instr);
         case 0x4:
             if ((instr >> 12) & 1) 
                 return THUMB_11;
-            return THUMB_10;
+            return thumb_decompress_10(instr, &cpu->curr_instr);
         case 0x5:
             if (((instr >> 12) & 1) == 0) 
                 return THUMB_12;
             if (((instr >> 9) & 0x3) == 0x2)
-                return THUMB_14;
-            return THUMB_13;
+                return thumb_decompress_14(instr, &cpu->curr_instr);
+            return thumb_decompress_13(instr, &cpu->curr_instr);
         case 0x6:
             switch ((instr >> 12) & 0x3) {
             case 0x0:
-                return THUMB_15;
+                return thumb_decompress_15(instr, &cpu->curr_instr);
             case 0x1:
                 switch ((instr >> 8) & 0xFF) {
                 case 0b11011111: return THUMB_17;
@@ -631,7 +631,8 @@ static int arm_branch() {
     int32_t offset = ((int32_t)((cpu->curr_instr & 0xFFFFFF) << 8) >> 8) << 2; // sign extended 24-bit offset shifted left by 2
 
     // adjust for step by 2 instead of 4 for translated THUMB immediates
-    if (THUMB_ACTIVATED) offset >>= 1;
+    if (THUMB_ACTIVATED) 
+        offset >>= 1;
 
     if (with_link) 
         set_reg(LR_REG, cpu->registers.r15 - 4);
@@ -929,10 +930,14 @@ static int arm_exec_instr(Word instr, InstrType type) {
 
             if (l) {
                 switch ((instr >> 5) & 0x3) {
-                case 1:
+                case 1: {
                     DEBUG_PRINT(("LDR%sH ", cond_to_cstr(cond)))
-                    set_reg(rd, read_mem(cpu->mem, addr, HALF_WORD_ACCESS));
+                    bool is_misaligned = (addr & 1);
+                    Word read_value = is_misaligned ? ROR(read_mem(cpu->mem, addr - 1, HALF_WORD_ACCESS), 8) 
+                        : read_mem(cpu->mem, addr, HALF_WORD_ACCESS);
+                    set_reg(rd, read_value);
                     break;
+                }
                 case 2:
                     DEBUG_PRINT(("LDR%sSB ", cond_to_cstr(cond)))
                     set_reg(rd, (int32_t)(int8_t)read_mem(cpu->mem, addr, BYTE_ACCESS));
@@ -1211,34 +1216,7 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         set_reg(rd, read_mem(cpu->mem, (cpu->registers.r15 & ~0x2) + nn, WORD_ACCESS));
         break;
     }
-    case THUMB_7: {
-        uint8_t ro = (instr >> 6) & 0x7;
-        uint8_t rb = (instr >> 3) & 0x7;
-        uint8_t rd = instr & 0x7;
 
-        Word addr = get_reg(rb) + get_reg(ro);
-
-        switch ((instr >> 10) & 0x3) {
-        case 0x0:
-            DEBUG_PRINT(("STR "))
-            write_mem(cpu->mem, addr, get_reg(rd), WORD_ACCESS);
-            break;
-        case 0x1:
-            DEBUG_PRINT(("STRB "))
-            write_mem(cpu->mem, addr, get_reg(rd), BYTE_ACCESS);
-            break;
-        case 0x2:
-            DEBUG_PRINT(("LDR "))
-            set_reg(rd, ROR(read_mem(cpu->mem, addr, WORD_ACCESS), ROT_READ_SHIFT_AMOUNT(addr)));
-            break;
-        case 0x3:
-            DEBUG_PRINT(("LDRB "))
-            set_reg(rd, read_mem(cpu->mem, addr, BYTE_ACCESS));
-            break;
-        }
-        DEBUG_PRINT(("%s, [%s, %s]\n", register_to_cstr(rd), register_to_cstr(rb), register_to_cstr(ro)))
-        break;
-    }
     // https://problemkaputt.de/gbatek.htm#armcpumemoryalignments (crazy edge case)
     //   LDRSH Rd,[odd]  -->  LDRSB Rd,[odd]         ;sign-expand BYTE value (ONLY FOR MISALIGNED READS!!)
     case THUMB_8: {
@@ -1268,34 +1246,6 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
             break;
         }
         DEBUG_PRINT(("%s, [%s, %s]\n", register_to_cstr(rd), register_to_cstr(rb), register_to_cstr(ro)))
-        break;
-    }
-    case THUMB_9: {
-        uint8_t nn = (instr >> 6) & 0x1F; // unsigned offset will be shifted left by 2 for WORD (7-bit immediate)
-        uint8_t rb = (instr >> 3) & 0x7;
-        uint8_t rd = instr & 0x7;
-
-        switch ((instr >> 11) & 0x3) {
-        case 0x0:
-            DEBUG_PRINT(("STR "))
-            write_mem(cpu->mem, get_reg(rb) + (nn << 2), get_reg(rd), WORD_ACCESS);
-            break;
-        case 0x1: {
-            DEBUG_PRINT(("LDR "))
-            Word addr = get_reg(rb) + (nn << 2);
-            set_reg(rd, ROR(read_mem(cpu->mem, addr, WORD_ACCESS), ROT_READ_SHIFT_AMOUNT(addr)));
-            break;
-        }
-        case 0x2:
-            DEBUG_PRINT(("STRB "))
-            write_mem(cpu->mem, get_reg(rb) + nn, get_reg(rd), BYTE_ACCESS);
-            break;
-        case 0x3:
-            DEBUG_PRINT(("LDRB "))
-            set_reg(rd, read_mem(cpu->mem, get_reg(rb) + nn, BYTE_ACCESS));
-            break;
-        }
-        DEBUG_PRINT(("%s, [%s, #%X]\n", register_to_cstr(rd), register_to_cstr(rb), nn))
         break;
     }
     case THUMB_10: {
@@ -1353,96 +1303,6 @@ static int thumb_exec_instr(uint16_t instr, InstrType type) {
         }
         break;
     }
-    case THUMB_13: {
-        Word nn = (instr & 0x7F) << 2;
-
-        if ((instr >> 7) & 1)
-            nn = -nn;
-
-        DEBUG_PRINT(("ADD sp, #0x%X\n", nn));
-        set_reg(SP_REG, get_reg(SP_REG) + nn);
-        break;
-    }
-    case THUMB_14: {
-        Bit pc_or_lr = (instr >> 8) & 1;
-        uint8_t reg_list = instr & 0xFF;
-
-        switch ((instr >> 11) & 1) {
-        case 0x0: { // equivelant to STMDB
-            DEBUG_PRINT(("PUSH { "))
-            DEBUG_PRINT(("%s", pc_or_lr ? "lr " : ""))
-
-            // push lr to stack
-            if (pc_or_lr) {
-                set_reg(0xD, get_reg(0xD) - WORD_ACCESS);
-                write_mem(cpu->mem, get_reg(0xD), get_reg(0xE), WORD_ACCESS);
-            }
-
-            for (int i = 7; i >= 0; i--) {
-                if ((reg_list >> i) & 1) {
-                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
-                    set_reg(0xD, get_reg(0xD) - WORD_ACCESS);
-                    write_mem(cpu->mem, get_reg(0xD), get_reg(i), WORD_ACCESS);
-                }
-            }
-
-            DEBUG_PRINT(("}\n"))
-            break;
-        }
-        case 0x1: // equivelant to LDMIA
-            DEBUG_PRINT(("POP { "))
-            for (int i = 0; i < 8; i++) {
-                if ((reg_list >> i) & 1) {
-                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
-                    set_reg(i, read_mem(cpu->mem, get_reg(0xD), WORD_ACCESS));
-                    set_reg(0xD, get_reg(0xD) + WORD_ACCESS);
-                }
-            }
-
-            // last popped value assigned to PC
-            if (pc_or_lr) {
-                cpu->registers.r15 = PC_UPDATE(read_mem(cpu->mem, get_reg(0xD), WORD_ACCESS) & ~0x1);
-                set_reg(0xD, get_reg(0xD) + WORD_ACCESS);
-            }
-
-            DEBUG_PRINT(("%s\n", pc_or_lr ? "pc }" : "}"))
-            break;
-        }
-        break;
-    }
-    case THUMB_15: {
-        uint8_t rb = (instr >> 8) & 0x7;
-        uint8_t r_list = instr & 0xFF;
-
-        switch ((instr >> 11) & 1) {
-        case 0:
-            DEBUG_PRINT(("STMIA %s!, { ", register_to_cstr(rb)))
-            for (int i = 0; i < r_list; i++) {
-                if ((r_list >> i) & 1) {
-                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
-                    Word base = get_reg(rb);
-                    write_mem(cpu->mem, base, get_reg(i), WORD_ACCESS);
-                    set_reg(rb, base + WORD_ACCESS);
-                }
-            }
-            DEBUG_PRINT(("}"))
-            break;
-        case 1:
-            DEBUG_PRINT(("LDMIA %s!, { ", register_to_cstr(rb)))
-            for (int i = 0; i < r_list; i++) {
-                if ((r_list >> i) & 1) {
-                    DEBUG_PRINT(("%s ", register_to_cstr(i)))
-                    Word base = get_reg(rb);
-                    set_reg(i, read_mem(cpu->mem, base, WORD_ACCESS));
-                    set_reg(rb, base + WORD_ACCESS);
-                }
-            }
-            DEBUG_PRINT(("}"))
-            break;
-        }
-        DEBUG_PRINT(("\n"))
-        break;
-    }
     case THUMB_17:
         printf("THUMB.17\n");
         exit(1);
@@ -1482,13 +1342,11 @@ static size_t execute(Word instr, InstrType type) {
 
     switch (type) {
     case THUMB_6:
-    case THUMB_7:
     case THUMB_8:
     case THUMB_9:
     case THUMB_10:
     case THUMB_11:
     case THUMB_12:
-    case THUMB_13:
     case THUMB_14:
     case THUMB_15:
     case THUMB_17:
