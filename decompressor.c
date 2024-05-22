@@ -9,23 +9,7 @@ InstrType thumb_decompress_1(HalfWord thumb_instr, Word *arm_instr) {
     Word shift_amount = (thumb_instr >> 6) & 0x1F;
     Word rs = (thumb_instr >> 3) & 0x7;
     Word rd = thumb_instr & 0x7;
-
-    ShiftType shift_type;
-
-    switch ((thumb_instr >> 11) & 0x3) {
-    case 0x0:
-        shift_type = SHIFT_TYPE_LSL;
-        break;
-    case 0x1:
-        shift_type = SHIFT_TYPE_LSR;
-        break;
-    case 0x2:
-        shift_type = SHIFT_TYPE_ASR;
-        break;
-    case 0x3:
-        shift_type = SHIFT_TYPE_ROR;
-        break;
-    }
+    ShiftType shift_type = (thumb_instr >> 11) & 0x3;
 
     translation |= (rd << 12);
     translation |= (shift_amount << 7);
@@ -42,21 +26,10 @@ InstrType thumb_decompress_2(HalfWord thumb_instr, Word *arm_instr) {
     Word rn_or_nn = (thumb_instr >> 6) & 0x7;
     Word rs = (thumb_instr >> 3) & 0x7;
     Word rd = thumb_instr & 0x7;
+    Word i = (thumb_instr >> 10) & 1;
+    Word arm_opcode = 0x2 << !((thumb_instr >> 9) & 1);
 
-    Word arm_opcode;
-
-    switch ((thumb_instr >> 9) & 0x3) {
-    case 0x3:
-        translation |= (0x1 << 25);
-    case 0x1:
-        arm_opcode = 0x2;
-        break;
-    case 0x2:
-        translation |= (0x1 << 25);
-    case 0x0:
-        arm_opcode = 0x4;
-    }
-
+    translation |= (i << 25);
     translation |= (arm_opcode << 21);
     translation |= (rs << 16);
     translation |= (rd << 12);
@@ -72,21 +45,11 @@ InstrType thumb_decompress_3(HalfWord thumb_instr, Word *arm_instr) {
     Word rd = (thumb_instr >> 8) & 0x7;
     Word nn = thumb_instr & 0xFF;
 
-    Word arm_opcode;
+    Word thumb_opcode = (thumb_instr >> 11) & 0x3;
+    Word arm_opcode = 0b1101;
 
-    switch ((thumb_instr >> 11) & 0x3) {
-    case 0x0:
-        arm_opcode = 0xD;
-        break;
-    case 0x1:
-        arm_opcode = 0xA;
-        break;
-    case 0x2:
-        arm_opcode = 0x4;
-        break;
-    case 0x3:
-        arm_opcode = 0x2;
-    }
+    arm_opcode = (arm_opcode << thumb_opcode) & 0xF;
+    arm_opcode >>= (!(~thumb_opcode & 0x3) << 1);
 
     translation |= (arm_opcode << 21);
     translation |= (rd << 16);
@@ -160,21 +123,10 @@ InstrType thumb_decompress_5(HalfWord thumb_instr, Word *arm_instr) {
 
     Word rs = (((thumb_instr >> 6) & 1) << 3) | ((thumb_instr >> 3) & 0x7); // MSBs added (r0-r15)
     Word rd = (((thumb_instr >> 7) & 1) << 3) | (thumb_instr & 0x7); // MSBd added (r0-r15)
+    Word thumb_opcode = (thumb_instr >> 8) & 0x3;
+    Word arm_opcode = 0b110100;
 
-    Word arm_opcode;
-
-    switch ((thumb_instr >> 8) & 0x3) {
-    case 0x0:
-        arm_opcode = 0x4;
-        break;
-    case 0x1: 
-        translation |= (1 << 20); // CMP is the only instruction that will set cc here
-        arm_opcode = 0xA;
-        break;
-    case 0x2:
-        arm_opcode = 0xD;
-        break;
-    case 0x3: // [unique case #1] -> decompressed to BX Rs
+    if (thumb_opcode == 0x3) {
         translation = 0b11100001001011111111111100010000;
         translation |= rs;
         
@@ -182,6 +134,9 @@ InstrType thumb_decompress_5(HalfWord thumb_instr, Word *arm_instr) {
         return BranchExchange;
     }
 
+    arm_opcode = (arm_opcode >> thumb_opcode) & 0xF;
+    
+    translation |= ((thumb_opcode == 0x1) << 20);
     translation |= (arm_opcode << 21);
     translation |= (rd << 16);
     translation |= (rd << 12);
@@ -208,6 +163,26 @@ InstrType thumb_decompress_7(HalfWord thumb_instr, Word *arm_instr) {
 
     *arm_instr = translation;
     return SingleDataTransfer;
+}
+
+InstrType thumb_decompress_8(HalfWord thumb_instr, Word *arm_instr) {
+    Word translation = 0b11100001100000000000000010010000;
+
+    Word ro = (thumb_instr >> 6) & 0x7;
+    Word rb = (thumb_instr >> 3) & 0x7;
+    Word rd = thumb_instr & 0x7;
+    Word thumb_opcode = (thumb_instr >> 10) & 0x3;
+    Word arm_opcode = (((thumb_opcode << 1) & 0x3) | ((thumb_opcode >> 1) & 1)) | !thumb_opcode;
+    Word l = !!thumb_opcode;
+
+    translation |= (l << 20);
+    translation |= (rb << 16);
+    translation |= (rd << 12);
+    translation |= (arm_opcode << 5);
+    translation |= ro;
+
+    *arm_instr = translation;
+    return HalfwordDataTransfer;
 }
 
 InstrType thumb_decompress_9(HalfWord thumb_instr, Word *arm_instr) {
@@ -247,13 +222,28 @@ InstrType thumb_decompress_10(HalfWord thumb_instr, Word *arm_instr) {
     return HalfwordDataTransfer;
 }
 
+InstrType thumb_decompress_11(HalfWord thumb_instr, Word *arm_instr) {
+    Word translation = 0b11100101100011010000000000000000;
+
+    Word l = (thumb_instr >> 11) & 1;
+    Word rd = (thumb_instr >> 8) & 0x7;
+    Word nn = (thumb_instr & 0xFF) << 2;
+
+    translation |= (l << 20);
+    translation |= (rd << 12);
+    translation |= nn;
+
+    *arm_instr = translation;
+    return SingleDataTransfer;
+}
+
 InstrType thumb_decompress_13(HalfWord thumb_instr, Word *arm_instr) {
     Word translation = 0b11100010000011011101111100000000;
 
     Word nn = (thumb_instr & 0x7F);
     bool is_signed = (thumb_instr >> 7) & 1;
 
-    translation |= ((is_signed ? 0x2 : 0x4) << 21);
+    translation |= (0x2 << (21 + is_signed));
     translation |= nn;
 
     *arm_instr = translation;
@@ -266,15 +256,12 @@ InstrType thumb_decompress_14(HalfWord thumb_instr, Word *arm_instr) {
     Word opcode = (thumb_instr >> 11) & 1;
     Word pc_or_lr = (thumb_instr >> 8) & 1;
     Word reg_list = thumb_instr & 0xFF;
-    Word pc_lr_target = (0x1 << (opcode ? 0xF : 0xE));
 
     translation |= (!opcode << 24);
     translation |= (opcode << 23);
     translation |= (opcode << 20);
     translation |= reg_list;
-
-    if (pc_or_lr)
-        translation |= pc_lr_target;
+    translation |= ((pc_or_lr & 1) << (0xE | opcode));
 
     *arm_instr = translation;
     return BlockDataTransfer;
