@@ -482,7 +482,7 @@ static InstrType decode(Word instr) {
                 return thumb_decompress_15(instr, &cpu->curr_instr);
             case 0x1:
                 switch ((instr >> 8) & 0xFF) {
-                case 0b11011111: return THUMB_SWI;
+                case 0b11011111: return thumb_decompress_17(instr, &cpu->curr_instr);
                 case 0b10111110:
                     fprintf(stderr, "CPU Error [THUMB]: debugging not supported!\n");
                     exit(1);
@@ -1250,10 +1250,6 @@ static int thumb_handler(InstrType type) {
         }
         break;
     }
-    case THUMB_SWI: // format 17
-        printf("THUMB.17\n");
-        exit(1);
-        break;
     case THUMB_LONG_BRANCH_1: { // format 19 (H = 0)
         Word upper_half_offset = (int32_t)((cpu->curr_instr & 0x7FF) << 21) >> 21;
         set_reg(LR_REG, cpu->registers.r15 + (upper_half_offset << 12));
@@ -1305,7 +1301,6 @@ static int execute(void) {
     case THUMB_RELATIVE_ADDRESS:
     case THUMB_LONG_BRANCH_1:
     case THUMB_LONG_BRANCH_2:
-    case THUMB_SWI:
         DEBUG_PRINT(("[THUMB] (%08X) %08X ", cpu->registers.r15 - 4, cpu->curr_instr))
         cycles_consumed = thumb_handler(type);
         break;
@@ -1340,20 +1335,11 @@ void init_GBA(const char *rom_file, const char *bios_file) {
     cpu->registers.cpsr |= System;
 }
 
-int poop = 0;
-
 uint16_t* compute_frame(uint16_t key_input) {
     cpu->mem->reg_keyinput = key_input;
 
     int total_cycles = 0;
     while (total_cycles < CYCLES_PER_FRAME) {
-        // if (cpu->registers.r15 == 0x0800089C || poop) poop++;
-
-        // if (poop == 30) {
-        //     print_dump();
-        //     exit(1);
-        // }
-
         int cycles_passed = execute();
         for (int j = 0; j < cycles_passed; j++) {
             tick_ppu();

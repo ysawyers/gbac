@@ -295,6 +295,15 @@ InstrType thumb_decompress_16(HalfWord thumb_instr, Word *arm_instr) {
     return Branch;
 }
 
+InstrType thumb_decompress_17(HalfWord thumb_instr, Word *arm_instr) {
+    Word translation = 0b11101111000000000000000000000000;
+
+    translation |= (thumb_instr & 0xFF);
+
+    *arm_instr = translation;
+    return translation;
+}
+
 InstrType thumb_decompress_18(HalfWord thumb_instr, Word *arm_instr) {
     Word translation = 0b11101010000000000000000000000000;
 

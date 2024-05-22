@@ -14,4 +14,5 @@ InstrType thumb_decompress_13(HalfWord thumb_instr, Word *arm_instr);
 InstrType thumb_decompress_14(HalfWord thumb_instr, Word *arm_instr);
 InstrType thumb_decompress_15(HalfWord thumb_instr, Word *arm_instr);
 InstrType thumb_decompress_16(HalfWord thumb_instr, Word *arm_instr);
+InstrType thumb_decompress_17(HalfWord thumb_instr, Word *arm_instr);
 InstrType thumb_decompress_18(HalfWord thumb_instr, Word *arm_instr);
