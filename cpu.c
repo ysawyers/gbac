@@ -798,6 +798,7 @@ static void arm_alu(uint8_t opcode, uint8_t rd, uint8_t rn, Word operand_1, Word
         cpu->registers.cpsr = get_psr_reg();
 }
 
+// FRAGILE!!
 static int arm_block_data_transfer(Bit l) {
     Bit p = (cpu->curr_instr >> 24) & 1;
     Bit u = (cpu->curr_instr >> 23) & 1;
@@ -809,12 +810,10 @@ static int arm_block_data_transfer(Bit l) {
 
     DEBUG_PRINT(("%s%s%s %s, { ", l ? "LDM" : "STM", amod_to_cstr(p, u), cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), register_to_cstr(rn)))
 
-    Word base_addr = get_reg(rn);
-    bool r15_transferred = (reg_list >> 0xF) & 1; // works in conjunction with s bit for special cases (see below)
-
     // in the case of a user bank transfer this will store the old cpsr value
-    // and will switch modes for this instruction alone (the effect technically last
+    // and will switch modes for this instruction alone (the effect should technically last for the following cpu instruction/cycle?? not sure)
     Word user_bank_transfer = 0;
+    bool r15_transferred = (reg_list >> 0xF) & 1;
 
     if (s) {
         if (l && r15_transferred) {
@@ -825,46 +824,52 @@ static int arm_block_data_transfer(Bit l) {
         }
     }
 
-    // returns number of bits set in register list
     int total_transfers = __builtin_popcount(reg_list);
+    bool empty_reg_list = total_transfers == 0;
+
+    Word base_addr = get_reg(rn);
+    Word base_addr_offset = empty_reg_list ? 0x40 : WORD_ACCESS;
+    if (!u) base_addr_offset = -base_addr_offset;
 
     // (ARMv4 edge case): for an empty register list r15 is loaded/stored, and base register
     // is written back to +/-40h
-    if (total_transfers == 0) {
+    if (empty_reg_list) {
         reg_list |= (1 << 0xF);
-        set_reg(rn, u ? base_addr + 0x40 : base_addr - 0x40);
+        set_reg(rn, base_addr + base_addr_offset);
     } else if (w) {
-        Word writeback_val = u ? base_addr + (total_transfers * WORD_ACCESS) : base_addr - (total_transfers * WORD_ACCESS);
-        set_reg(rn, writeback_val);
+        set_reg(rn, base_addr + (total_transfers * base_addr_offset));
     }
 
-    // returns the index of the first bit from the right to check for a
-    // unique STM edge case with rb included in the register list (see below)
     uint8_t first_transferred_reg = __builtin_ffs(reg_list) - 1;
+
+    // a clone of the base address has to be made (covering STM edge case below) because while to the CPU
+    // no matter the addressing mode, it will transfer registers in order from r0-r15
+    // however this is not the case with this implementation
     Word base_addr_copy = base_addr;
 
     // r0 (or the first transferred register from the file) should be transferred 
     // to/from the lowest address location out of the entire register file
-    for (int reg = u ? 0x0 : 0xF; reg != (u ? 0x10 : -1); u ? reg++ : reg--) {
-        bool should_transfer = (reg_list >> reg) & 1;
-
-        if (should_transfer) {
-            Word addr = p ? u ? base_addr + WORD_ACCESS : base_addr - WORD_ACCESS : base_addr;
+    for (int reg = (u ? 0x0 : 0xF); reg != (u ? 0x10 : -1); u ? reg++ : reg--) {
+        if ((reg_list >> reg) & 1) {
+            Word transfer_addr = p ? base_addr + base_addr_offset : base_addr;
 
             if (l) {
-                set_reg(reg, read_mem(cpu->mem, addr, WORD_ACCESS)); // LDM
+                set_reg(reg, read_mem(cpu->mem, transfer_addr, WORD_ACCESS)); // LDM
             } else {
-                Word stored_value = get_reg(reg);
-                if (reg == 0xF) 
-                    stored_value = PC_VALUE;
+                // if im being honest this is what works but i have no idea why
+                // the offsets are like this for the empty reg case and only for STM
+                // but it works™️
+                if (empty_reg_list)
+                    transfer_addr = u ? base_addr + (p ? 0x04 : 0x00)
+                        : base_addr - (p ? 0x40 : 0x3C);
+
+                Word stored_value = reg == 0xF ? PC_VALUE : get_reg(reg);
                 // A STM which includes storing the base, with the base as the first register to be stored, 
                 // will therefore store the unchanged base address value, whereas with the base second or later 
                 // in the transfer order, will store the register value (stored_value)
-                write_mem(cpu->mem, addr, (reg == rn && rn == first_transferred_reg) ? base_addr_copy : stored_value, WORD_ACCESS); // STM
+                write_mem(cpu->mem, transfer_addr, (reg == rn && rn == first_transferred_reg) ? base_addr_copy : stored_value, WORD_ACCESS); // STM
             }
-
-            base_addr = u ? base_addr + WORD_ACCESS 
-                : base_addr - WORD_ACCESS;
+            base_addr = base_addr + base_addr_offset;
 
             DEBUG_PRINT(("%s ", register_to_cstr(reg)))
         }
@@ -873,7 +878,7 @@ static int arm_block_data_transfer(Bit l) {
 
     if (user_bank_transfer) 
         cpu->registers.cpsr = user_bank_transfer;
-    
+
     return 1;
 }
 
@@ -937,7 +942,7 @@ static void arm_halfword_data_transfer(Bit p, Bit w, Bit l, Bit i, Bit u) {
     // writebacks handled the same way as single data transfer (see below)
     if (should_write_back) 
         if (!l || !(rn == rd))
-            set_reg(rn, (get_reg(rn) + ((rn == 0xF) << 2)) + offset);
+            set_reg(rn, get_reg(rn) + ((rn == 0xF) << 2) + offset);
 
     DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
     if (p) {
@@ -989,7 +994,6 @@ static void arm_single_data_transfer(Bit i, Bit p, Bit u, Bit b, Bit t, Bit l) {
     if (l) {
         // https://problemkaputt.de/gbatek.htm#armcpumemoryalignments
         // LDR has unique handling for misaligned accesses
-
         DEBUG_PRINT(("LDR%s%s%s ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), b ? "B" : "", t && !p ? "T" : ""))
         Word read_value = b ? read_mem(cpu->mem, addr, BYTE_ACCESS)
             : ROR(read_mem(cpu->mem, addr, WORD_ACCESS), ROT_READ_SHIFT_AMOUNT(addr));
@@ -1003,11 +1007,9 @@ static void arm_single_data_transfer(Bit i, Bit p, Bit u, Bit b, Bit t, Bit l) {
     }
 
     if (should_write_back)
-        // (?) from what i can tell writeback should not occur here
-        // if rn == rd for a LDR instruction which makes sense because
-        // you wouldn't want to override the register that was just written to
+        // writeback should not occur with a load with a base register that is the same as destination
         if (!l || !(rn == rd))
-            set_reg(rn, (get_reg(rn) + ((rn == 0xF) << 2)) + offset);
+            set_reg(rn, get_reg(rn) + ((rn == 0xF) << 2) + offset);
 
     DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
     if (p) {
@@ -1353,11 +1355,20 @@ void init_GBA(const char *rom_file, const char *bios_file) {
     cpu->registers.cpsr |= System;
 }
 
+int poop = 0;
+
 uint16_t* compute_frame(uint16_t key_input) {
     cpu->mem->reg_keyinput = key_input;
 
     int total_cycles = 0;
     while (total_cycles < CYCLES_PER_FRAME) {
+        // if (cpu->registers.r15 == 0x080019F4 || poop) poop++;
+        
+        // if (poop == 164) {
+        //     print_dump();
+        //     exit(1);
+        // }
+
         int cycles_passed = execute();
         for (int j = 0; j < cycles_passed; j++) {
             tick_ppu();
