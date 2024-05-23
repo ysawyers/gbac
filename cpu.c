@@ -828,17 +828,18 @@ static int arm_block_data_transfer(Bit l) {
     bool empty_reg_list = total_transfers == 0;
 
     Word base_addr = get_reg(rn);
-    Word base_addr_offset = empty_reg_list ? 0x40 : WORD_ACCESS;
-    if (!u) base_addr_offset = -base_addr_offset;
+    Word base_addr_offset = u ? WORD_ACCESS : -WORD_ACCESS;
 
     // (ARMv4 edge case): for an empty register list r15 is loaded/stored, and base register
-    // is written back to +/-40h
+    // is written back to +/-40h since the register count is 16 (even though only 1 transfer occurs)
     if (empty_reg_list) {
         reg_list |= (1 << 0xF);
-        set_reg(rn, base_addr + base_addr_offset);
-    } else if (w) {
-        set_reg(rn, base_addr + (total_transfers * base_addr_offset));
+        total_transfers = 16;
+        w = true;
     }
+
+    if (w)
+        set_reg(rn, base_addr + (total_transfers * base_addr_offset));
 
     uint8_t first_transferred_reg = __builtin_ffs(reg_list) - 1;
 
@@ -848,31 +849,42 @@ static int arm_block_data_transfer(Bit l) {
     Word base_addr_copy = base_addr;
 
     // r0 (or the first transferred register from the file) should be transferred 
-    // to/from the lowest address location out of the entire register file
-    for (int reg = (u ? 0x0 : 0xF); reg != (u ? 0x10 : -1); u ? reg++ : reg--) {
-        if ((reg_list >> reg) & 1) {
+    // to/from the lowest address location out of the entire register file however
+    // this is reversed in the empty register case
+    int reg_start, reg_end, step;
+    if (u ^ empty_reg_list) {
+        reg_start = 0;
+        reg_end = 0x10;
+        step = 1;
+    } else {
+        reg_start = 0xF;
+        reg_end = -1;
+        step = -1;
+    }
+
+    for (int reg = reg_start; reg != reg_end; reg += step) {
+        bool should_transfer = (reg_list >> reg) & 1;
+
+        if (should_transfer) {
             Word transfer_addr = p ? base_addr + base_addr_offset : base_addr;
 
             if (l) {
                 set_reg(reg, read_mem(cpu->mem, transfer_addr, WORD_ACCESS)); // LDM
             } else {
-                // if im being honest this is what works but i have no idea why
-                // the offsets are like this for the empty reg case and only for STM
-                // but it works™️
-                if (empty_reg_list)
-                    transfer_addr = u ? base_addr + (p ? 0x04 : 0x00)
-                        : base_addr - (p ? 0x40 : 0x3C);
-
                 Word stored_value = reg == 0xF ? PC_VALUE : get_reg(reg);
                 // A STM which includes storing the base, with the base as the first register to be stored, 
                 // will therefore store the unchanged base address value, whereas with the base second or later 
                 // in the transfer order, will store the register value (stored_value)
                 write_mem(cpu->mem, transfer_addr, (reg == rn && rn == first_transferred_reg) ? base_addr_copy : stored_value, WORD_ACCESS); // STM
             }
-            base_addr = base_addr + base_addr_offset;
 
             DEBUG_PRINT(("%s ", register_to_cstr(reg)))
+            base_addr += base_addr_offset;
         }
+
+        // when the register list is empty the register count will be 16
+        // and the base (not the actual register) should be incremented
+        if (empty_reg_list) base_addr += base_addr_offset;
     }
     DEBUG_PRINT(("}\n"))
 
@@ -1362,13 +1374,6 @@ uint16_t* compute_frame(uint16_t key_input) {
 
     int total_cycles = 0;
     while (total_cycles < CYCLES_PER_FRAME) {
-        // if (cpu->registers.r15 == 0x080019F4 || poop) poop++;
-        
-        // if (poop == 164) {
-        //     print_dump();
-        //     exit(1);
-        // }
-
         int cycles_passed = execute();
         for (int j = 0; j < cycles_passed; j++) {
             tick_ppu();
