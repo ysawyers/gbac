@@ -36,9 +36,15 @@
 // compute shift amount for rotated reads (LDR/SWP)
 #define ROT_READ_SHIFT_AMOUNT(addr) (((addr) & 0x3) * 8)
 
-// used to fix pipeline flush edge case on pc updates 
+// certain instructions will be aware of the stored value of r15 being
+// two instructions ahead of the currently executed instruction
+// and the returned value of r15 will be + 12 or + 6 respective of the current mode
+#define PC_VALUE (THUMB_ACTIVATED ? cpu->registers.r15 + HALF_WORD_ACCESS : cpu->registers.r15 + WORD_ACCESS)
+
+// used to fix pipeline flush edge case on pc updates
 // that are pointing to PC(+2 FOR THUMB)(+4 FOR ARM)
 // which in the execute stage (for this implementation) r15 = PC (+2/+4 respectively)
+// so just checking before and after execute if PC has changed will not suffice
 #define PC_UPDATE(new_pc)   cpu->registers.r15 = new_pc; \ 
                             cpu->pipeline = 0; \
 
@@ -505,30 +511,32 @@ static InstrType decode(Word instr) {
         case 0x0:
             switch ((instr >> 4) & 0xF) {
             case 0x1:
-                if (((instr >> 8) & 0xF) == 0xF) return BranchExchange;
+                if (((instr >> 8) & 0xF) == 0xF) 
+                    return BRANCH_X;
                 goto psr_transfer_or_alu_op;
             case 0x9:
                 switch ((instr >> 23) & 0x3) {
                 case 0x0:
                 case 0x1: return Multiply;
-                case 0x2: return SingleDataSwap;
+                case 0x2: return SWP;
                 default: return ARM_BAD_INSTR;
                 }
             case 0xB:
-            case 0xD: return HalfwordDataTransfer;
+            case 0xD: 
+            case 0xF: return HalfwordDataTransfer;
             default: goto psr_transfer_or_alu_op;
             }
         case 0x1: goto psr_transfer_or_alu_op;
         case 0x2:
         case 0x3: return SingleDataTransfer;
         case 0x4: return BlockDataTransfer;
-        case 0x5: return Branch;
+        case 0x5: return BRANCH;
         case 0x6:
             fprintf(stderr, "CPU Error [ARM]: coprocessor instructions not supported on GBA!\n");
             exit(1);
         case 0x7:
             if ((instr >> 24) & 1) 
-                return SoftwareInterrupt;
+                return SWI;
             fprintf(stderr, "CPU Error [ARM]: debugging not supported!\n", instr);
             exit(1);
         default: return ARM_BAD_INSTR;
@@ -548,7 +556,7 @@ static InstrType decode(Word instr) {
                         return MSR;
                     return MRS;
                 };
-            default: return DataProcessing;
+            default: return ALU;
         }
     }
 }
@@ -847,15 +855,8 @@ static int arm_block_data_transfer(Bit l) {
                 set_reg(reg, read_mem(cpu->mem, addr, WORD_ACCESS)); // LDM
             } else {
                 Word stored_value = get_reg(reg);
-
-                if (reg == 0xF) {
-                    if (THUMB_ACTIVATED) {
-                        stored_value += HALF_WORD_ACCESS;
-                    } else {
-                        stored_value += WORD_ACCESS;
-                    }
-                }
-
+                if (reg == 0xF) 
+                    stored_value = PC_VALUE;
                 // A STM which includes storing the base, with the base as the first register to be stored, 
                 // will therefore store the unchanged base address value, whereas with the base second or later 
                 // in the transfer order, will store the register value (stored_value)
@@ -872,11 +873,19 @@ static int arm_block_data_transfer(Bit l) {
 
     if (user_bank_transfer) 
         cpu->registers.cpsr = user_bank_transfer;
-
+    
     return 1;
 }
 
-static void arm_halfword_data_transfer(Bit p, Bit w, Bit l, Bit i, Bit u, uint8_t rd, uint8_t rn,  Word offset) {
+static void arm_halfword_data_transfer(Bit p, Bit w, Bit l, Bit i, Bit u) {
+    uint8_t rn = (cpu->curr_instr >> 16) & 0xF;
+    uint8_t rd = (cpu->curr_instr >> 12) & 0xF;
+
+    int32_t offset = i ?
+        ((((cpu->curr_instr >> 8) & 0xF) << 4) | (cpu->curr_instr & 0xF)) : 
+            get_reg(cpu->curr_instr & 0xF);
+    if (!u) offset = -offset;
+
     Word addr = get_reg(rn) + (p ? offset : 0);
     bool should_write_back = (p && w) || !p;
 
@@ -885,7 +894,7 @@ static void arm_halfword_data_transfer(Bit p, Bit w, Bit l, Bit i, Bit u, uint8_
         // LDRH and LDRSH have unique handling for misaligned accesses
 
         switch ((cpu->curr_instr >> 5) & 0x3) {
-        case 1: {
+        case 0x1: {
             DEBUG_PRINT(("LDR%sH ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr))))
             bool is_misaligned = addr & 1;
             Word read_value = is_misaligned ? ROR(read_mem(cpu->mem, addr - 1, HALF_WORD_ACCESS), 8) 
@@ -893,11 +902,11 @@ static void arm_halfword_data_transfer(Bit p, Bit w, Bit l, Bit i, Bit u, uint8_
             set_reg(rd, read_value);
             break;
         }
-        case 2:
+        case 0x2:
             DEBUG_PRINT(("LDR%sSB ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr))))
             set_reg(rd, (int32_t)(int8_t)read_mem(cpu->mem, addr, BYTE_ACCESS));
             break;
-        case 3: {
+        case 0x3: {
             DEBUG_PRINT(("LDR%sSH ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr))))
             bool is_misaligned = addr & 1;
             Word read_value = is_misaligned ? (int32_t)(int8_t)read_mem(cpu->mem, addr, BYTE_ACCESS)
@@ -908,16 +917,16 @@ static void arm_halfword_data_transfer(Bit p, Bit w, Bit l, Bit i, Bit u, uint8_
         }
     } else {
         switch ((cpu->curr_instr >> 5) & 0x3) {
-        case 1:
+        case 0x1:
             DEBUG_PRINT(("STR%sH ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr))))
             write_mem(cpu->mem, addr, get_reg(rd), HALF_WORD_ACCESS);
             break;
-        case 2:
+        case 0x2:
             DEBUG_PRINT(("LDR%sD ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr))))
             printf("IMPL LDRD");
             exit(1);
             break;
-        case 3:
+        case 0x3:
             DEBUG_PRINT(("STR%sD ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr))))
             printf("IMPL STRD");
             exit(1);
@@ -925,9 +934,80 @@ static void arm_halfword_data_transfer(Bit p, Bit w, Bit l, Bit i, Bit u, uint8_
         }
     }
 
-    if (should_write_back && rn != 0xF) 
-        if (rd != rn)
-            set_reg(rn, get_reg(rn) + offset);
+    // writebacks handled the same way as single data transfer (see below)
+    if (should_write_back) 
+        if (!l || !(rn == rd))
+            set_reg(rn, (get_reg(rn) + ((rn == 0xF) << 2)) + offset);
+
+    DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
+    if (p) {
+        DEBUG_PRINT(("[%s", register_to_cstr(rn)))
+        if (i) {
+            if (offset) {
+                DEBUG_PRINT((", #0x%X]", !u ? -offset : offset))
+            } else {
+                DEBUG_PRINT(("]"))
+            }
+        } else {
+            DEBUG_PRINT((", %s]", register_to_cstr(cpu->curr_instr & 0xF)))
+        }
+        DEBUG_PRINT(("%s", should_write_back ? "!" : ""))
+    } else {
+        DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
+        if (i) {
+            DEBUG_PRINT(("#0x%X", !u ? -offset : offset))
+        } else {
+            DEBUG_PRINT(("%s", register_to_cstr(cpu->curr_instr & 0xF)))
+        }
+    }
+    DEBUG_PRINT(("\n"))
+}
+
+static void arm_single_data_transfer(Bit i, Bit p, Bit u, Bit b, Bit t, Bit l) {
+    uint8_t rn = (cpu->curr_instr >> 16) & 0xF;
+    uint8_t rd = (cpu->curr_instr >> 12) & 0xF;
+    uint8_t rm = cpu->curr_instr & 0xF;
+
+    uint8_t shift_amount = (cpu->curr_instr >> 7) & 0x1F;
+    Word offset = i ? barrel_shifter((cpu->curr_instr >> 5) & 0x3, get_reg(cpu->curr_instr & 0xF), shift_amount, true) 
+        : cpu->curr_instr & 0xFFF;
+    if (!u) offset = -offset;
+
+    Word addr = get_reg(rn) + (p ? offset : 0);
+    bool should_write_back = !p || (p && t);
+
+    if (p && b && l && !t && (rd == 0xF) && (((cpu->curr_instr >> 28) & 0xF) == 0xF)) {
+        printf("PLD INSTRUCTION!\n");
+        exit(1);
+    }
+
+    if (!p && t) {
+        printf("memory manage bit is set\n");
+        exit(1);
+    }
+
+    if (l) {
+        // https://problemkaputt.de/gbatek.htm#armcpumemoryalignments
+        // LDR has unique handling for misaligned accesses
+
+        DEBUG_PRINT(("LDR%s%s%s ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), b ? "B" : "", t && !p ? "T" : ""))
+        Word read_value = b ? read_mem(cpu->mem, addr, BYTE_ACCESS)
+            : ROR(read_mem(cpu->mem, addr, WORD_ACCESS), ROT_READ_SHIFT_AMOUNT(addr));
+        set_reg(rd, read_value);
+    } else {
+        DEBUG_PRINT(("STR%s%s%s ", cond_to_cstr(ARM_INSTR_COND(cpu->curr_instr)), b ? "B" : "", t && !p ? "T" : ""))
+        // THUMB will not decompress to an instruction that will specify a rd of 15
+        // so only the PC + 12 case has to be handled here
+        Word stored_value = get_reg(rd) + ((rd == 0xF) << 2);
+        write_mem(cpu->mem, addr, stored_value, b ? BYTE_ACCESS : WORD_ACCESS);
+    }
+
+    if (should_write_back)
+        // (?) from what i can tell writeback should not occur here
+        // if rn == rd for a LDR instruction which makes sense because
+        // you wouldn't want to override the register that was just written to
+        if (!l || !(rn == rd))
+            set_reg(rn, (get_reg(rn) + ((rn == 0xF) << 2)) + offset);
 
     DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
     if (p) {
@@ -960,36 +1040,39 @@ static int arm_handler(Word instr, InstrType type) {
     if (eval_cond(cond)) {
         switch (type) {
         case NOP: return 1;
-        case Branch: return arm_branch();
-        case BranchExchange: return arm_branch_exchange();
-        case BlockDataTransfer: return arm_block_data_transfer((cpu->curr_instr >> 20) & 1);
-        case DataProcessing: {
+        case BRANCH: return arm_branch();
+        case BRANCH_X: return arm_branch_exchange();
+        case BlockDataTransfer: {
+            Bit l = (instr >> 20) & 1;
+
+            return arm_block_data_transfer(l);
+        };
+        case ALU: {
             Bit i = (instr >> 25) & 1;
             Bit s = (instr >> 20) & 1;
-
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;
-
             Word operand_1 = get_reg(rn);
             Word operand_2;
-
+ 
             if (i) {
                 uint8_t shift_amount = ((instr & 0xF00) >> 8) * 2;
+
                 operand_2 = barrel_shifter(SHIFT_TYPE_ROR, instr & 0xFF, shift_amount, false);
             } else {
                 Bit r = (instr >> 4) & 1;
-
                 uint8_t shift_type = (instr >> 5) & 0x3;
                 uint8_t rm = instr & 0xF;
+                Word rm_val = get_reg(rm);
 
                 if (r) {
-                    if (rn == 0xF) 
-                        operand_1 += 4;
+                    if (rn == 0xF) operand_1 = PC_VALUE;
+                    if (rm == 0xF) rm_val = PC_VALUE;
                     uint8_t shift_amount = get_reg((instr >> 8) & 0xF) & 0xFF;
-                    operand_2 = barrel_shifter(shift_type, get_reg(rm) + (rm == 0xF ? 4 : 0), shift_amount, false);
+                    operand_2 = barrel_shifter(shift_type, rm_val, shift_amount, false);
                 } else {
                     uint8_t shift_amount = (instr >> 7) & 0x1F;
-                    operand_2 = barrel_shifter(shift_type, get_reg(rm), shift_amount, true);
+                    operand_2 = barrel_shifter(shift_type, rm_val, shift_amount, true);
                 }
             }
 
@@ -1003,15 +1086,7 @@ static int arm_handler(Word instr, InstrType type) {
             Bit w = (instr >> 21) & 1;
             Bit l = (instr >> 20) & 1;
 
-            uint8_t rn = (instr >> 16) & 0xF;
-            uint8_t rd = (instr >> 12) & 0xF;
-
-            int32_t offset = i ?
-                ((((instr >> 8) & 0xF) << 4) | (instr & 0xF)) : 
-                    get_reg(instr & 0xF);
-            if (!u) offset = -offset;
-
-            arm_halfword_data_transfer(p, w, l, i, u, rd, rn, offset);
+            arm_halfword_data_transfer(p, w, l, i, u);
             return 1;
         }
         case SingleDataTransfer: {
@@ -1022,67 +1097,10 @@ static int arm_handler(Word instr, InstrType type) {
             Bit t = (instr >> 21) & 1;
             Bit l = (instr >> 20) & 1;
 
-            uint8_t rn = (instr >> 16) & 0xF;
-            uint8_t rd = (instr >> 12) & 0xF;
-            uint8_t rm = instr & 0xF;
-
-            uint8_t shift_amount = (instr >> 7) & 0x1F;
-            Word operand_2 = i ? barrel_shifter((instr >> 5) & 0x3, get_reg(instr & 0xF), shift_amount, true) 
-                : instr & 0xFFF;
-
-            if (!u) operand_2 = -operand_2;
-
-            Word addr = get_reg(rn) + (p ? operand_2 : 0);
-            bool should_write_back = !p || (p && t);
-
-            if (p && b && !t && l && rd == 0xF && cond == 0xF) {
-                printf("PLD INSTRUCTION!\n");
-                exit(1);
-            }
-
-            switch (l) {
-            case 0:
-                DEBUG_PRINT(("STR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t && !p ? "T" : ""))
-                Word stored_value = get_reg(rd) + (rd == 0xF ? 4 : 0); // when rd is used for STR instruction PC + 12 is used
-                write_mem(cpu->mem, addr, stored_value, b ? BYTE_ACCESS : WORD_ACCESS);             
-                break;
-            case 1:
-                DEBUG_PRINT(("LDR%s%s%s ", cond_to_cstr(cond), b ? "B" : "", t && !p ? "T" : ""))
-                Word read_value = b ? read_mem(cpu->mem, addr, BYTE_ACCESS)
-                    : ROR(read_mem(cpu->mem, addr, WORD_ACCESS), ROT_READ_SHIFT_AMOUNT(addr));
-                set_reg(rd, read_value);
-                break;
-            }
-
-            if (should_write_back && rn != 0xF)
-                if (rd != rn)
-                    set_reg(rn, get_reg(rn) + operand_2);
-
-            DEBUG_PRINT(("%s, ", register_to_cstr(rd)))
-            if (p) {
-                DEBUG_PRINT(("[%s", register_to_cstr(rn)))
-                if (i) {
-                    if (operand_2) {
-                        DEBUG_PRINT((", #0x%X]", !u ? -operand_2 : operand_2))
-                    } else {
-                        DEBUG_PRINT(("]"))
-                    }
-                } else {
-                    DEBUG_PRINT((", %s]", register_to_cstr(instr & 0xF)))
-                }
-                DEBUG_PRINT(("%s", should_write_back ? "!" : ""))
-            } else {
-                DEBUG_PRINT(("[%s], ", register_to_cstr(rn)))
-                if (i) {
-                    DEBUG_PRINT(("#0x%X", !u ? -operand_2 : operand_2))
-                } else {
-                    DEBUG_PRINT(("%s", register_to_cstr(instr & 0xF)))
-                }
-            }
-            DEBUG_PRINT(("\n"))
-            break;
+            arm_single_data_transfer(i, p, u, b, t, l);
+            return 1;
         }
-        case SoftwareInterrupt:
+        case SWI:
             DEBUG_PRINT(("SWI%s #%X\n", cond_to_cstr(cond), instr & 0xFFFFFF))
             cpu->registers.r14_svc = cpu->registers.r15 - 4; // LR set to the instruction following SWI (PC + 4) (note: r15 always PC + 8)
             cpu->registers.spsr_svc = cpu->registers.cpsr;
@@ -1193,7 +1211,7 @@ static int arm_handler(Word instr, InstrType type) {
 
             break;
         }
-        case SingleDataSwap: {
+        case SWP: {
             Bit b = (instr >> 22) & 1;
             uint8_t rn = (instr >> 16) & 0xF;
             uint8_t rd = (instr >> 12) & 0xF;

@@ -24,7 +24,7 @@ void load_bios(Memory *mem, char *bios_file) {
     size_t size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    fread(mem->bios, sizeof(mem->bios[0]), size, fp);
+    fread(mem->bios, sizeof(uint8_t), size, fp);
     
     fclose(fp);
 }
@@ -40,7 +40,7 @@ void load_rom(Memory *mem, char *rom_file) {
     size_t size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    fread(mem->rom, sizeof(mem->rom[0]), size, fp);
+    fread(mem->rom, sizeof(uint8_t), size, fp);
     
     fclose(fp);
 }

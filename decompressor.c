@@ -17,7 +17,7 @@ InstrType thumb_decompress_1(HalfWord thumb_instr, Word *arm_instr) {
     translation |= rs;
 
     *arm_instr = translation;
-    return DataProcessing;
+    return ALU;
 }
 
 InstrType thumb_decompress_2(HalfWord thumb_instr, Word *arm_instr) {
@@ -36,7 +36,7 @@ InstrType thumb_decompress_2(HalfWord thumb_instr, Word *arm_instr) {
     translation |= rn_or_nn;
 
     *arm_instr = translation;
-    return DataProcessing;
+    return ALU;
 }
 
 InstrType thumb_decompress_3(HalfWord thumb_instr, Word *arm_instr) {
@@ -57,7 +57,7 @@ InstrType thumb_decompress_3(HalfWord thumb_instr, Word *arm_instr) {
     translation |= nn;
 
     *arm_instr = translation;
-    return DataProcessing;
+    return ALU;
 }
 
 InstrType thumb_decompress_4(HalfWord thumb_instr, Word *arm_instr) {
@@ -88,7 +88,7 @@ InstrType thumb_decompress_4(HalfWord thumb_instr, Word *arm_instr) {
         translation |= (rs << 16);
 
         *arm_instr = translation;
-        return DataProcessing;
+        return ALU;
     case 0xD: // [unique case #2] MUL -> MULS Rd, Rs, Rd
         translation |= (rd << 16);
         translation |= rs;
@@ -106,7 +106,7 @@ InstrType thumb_decompress_4(HalfWord thumb_instr, Word *arm_instr) {
         translation |= (shift_type << 5);
 
         *arm_instr = translation;
-        return DataProcessing;
+        return ALU;
 
     // LSL,LSR,ASR,ROR -> MOV rd, rd <SHIFT> rs
     thumb_shift_instr:
@@ -131,7 +131,7 @@ InstrType thumb_decompress_5(HalfWord thumb_instr, Word *arm_instr) {
         translation |= rs;
         
         *arm_instr = translation;
-        return BranchExchange;
+        return BRANCH_X;
     }
 
     arm_opcode = (arm_opcode >> thumb_opcode) & 0xF;
@@ -143,7 +143,7 @@ InstrType thumb_decompress_5(HalfWord thumb_instr, Word *arm_instr) {
     translation |= rs;
 
     *arm_instr = translation;
-    return DataProcessing;
+    return ALU;
 }
 
 InstrType thumb_decompress_7(HalfWord thumb_instr, Word *arm_instr) {
@@ -247,7 +247,7 @@ InstrType thumb_decompress_13(HalfWord thumb_instr, Word *arm_instr) {
     translation |= nn;
 
     *arm_instr = translation;
-    return DataProcessing;
+    return ALU;
 }
 
 InstrType thumb_decompress_14(HalfWord thumb_instr, Word *arm_instr) {
@@ -292,7 +292,7 @@ InstrType thumb_decompress_16(HalfWord thumb_instr, Word *arm_instr) {
     translation |= (offset & 0xFFFFFF);
 
     *arm_instr = translation;
-    return Branch;
+    return BRANCH;
 }
 
 InstrType thumb_decompress_17(HalfWord thumb_instr, Word *arm_instr) {
@@ -311,5 +311,5 @@ InstrType thumb_decompress_18(HalfWord thumb_instr, Word *arm_instr) {
     translation |= (offset & 0xFFFFFF);
 
     *arm_instr = translation;
-    return Branch;
+    return BRANCH;
 }

@@ -13,15 +13,14 @@ typedef enum {
 } ShiftType;
 
 typedef enum {
-    Branch,
-    BranchExchange,
+    BRANCH,
+    BRANCH_X,
     BlockDataTransfer,
     HalfwordDataTransfer,
     SingleDataTransfer,
     Multiply,
-    SoftwareInterrupt,
-    SingleDataSwap,
-    DataProcessing,
+    SWI,
+    ALU,
     MSR,
     MRS,
     SWP,
