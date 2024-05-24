@@ -9,7 +9,7 @@
 #define CYCLES_PER_FRAME 280896
 
 #define WORD_ACCESS       4
-#define HALF_WORD_ACCESS  2
+#define HALFWORD_ACCESS  2
 #define BYTE_ACCESS       1
 
 #define CC_UNSET  0
@@ -39,7 +39,7 @@
 // certain instructions will be aware of the stored value of r15 being
 // two instructions ahead of the currently executed instruction
 // and the returned value of r15 will be + 12 or + 6 respective of the current mode
-#define PC_VALUE (THUMB_ACTIVATED ? cpu->registers.r15 + HALF_WORD_ACCESS : cpu->registers.r15 + WORD_ACCESS)
+#define PC_VALUE (THUMB_ACTIVATED ? cpu->registers.r15 + HALFWORD_ACCESS : cpu->registers.r15 + WORD_ACCESS)
 
 // used to fix pipeline flush edge case on pc updates
 // that are pointing to PC(+2 FOR THUMB)(+4 FOR ARM)
@@ -437,8 +437,8 @@ static Word fetch() {
     Word instr;
 
     if (THUMB_ACTIVATED) {
-        instr = read_mem(cpu->mem, cpu->registers.r15, HALF_WORD_ACCESS);
-        cpu->registers.r15 += HALF_WORD_ACCESS;
+        instr = read_mem(cpu->mem, cpu->registers.r15, HALFWORD_ACCESS);
+        cpu->registers.r15 += HALFWORD_ACCESS;
     } else {
         instr = read_mem(cpu->mem, cpu->registers.r15, WORD_ACCESS);
         cpu->registers.r15 += WORD_ACCESS;
@@ -447,6 +447,7 @@ static Word fetch() {
     return instr;
 }
 
+// NOTE: might benefit from a LUT here in the future 
 static InstrType decode(Word instr) {
     cpu->curr_instr = instr;
     cpu->pipeline = fetch();
@@ -646,11 +647,11 @@ static int arm_branch(void) {
 
     if (with_link) 
         set_reg(LR_REG, cpu->registers.r15 - 4);
-        
+
     cpu->registers.r15 = PC_UPDATE(cpu->registers.r15 + offset);
 
     DEBUG_PRINT(("B%s%s #0x%X\n", with_link ? "L" : "", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), cpu->registers.r15))
-    return 1;
+    return 3;
 }
 
 static int arm_branch_exchange(void) {
@@ -678,7 +679,7 @@ static int arm_branch_exchange(void) {
         exit(1);
     }
 
-    return 1;
+    return 3;
 }
 
 static int arm_alu(void) {
@@ -690,6 +691,10 @@ static int arm_alu(void) {
 
     Word operand_1 = get_reg(rn);
     Word operand_2;
+
+    // used to help calculate number of cycles for this instruction
+    bool reg_shift = false;
+    bool r15_transferred = rd == 0xF;
 
     if (i) {
         uint8_t shift_amount = ((cpu->curr_instr & 0xF00) >> 8) * 2;
@@ -705,6 +710,7 @@ static int arm_alu(void) {
             if (rm == 0xF) rm_val = PC_VALUE;
             uint8_t shift_amount = get_reg((cpu->curr_instr >> 8) & 0xF) & 0xFF;
             operand_2 = barrel_shifter(shift_type, rm_val, shift_amount, false);
+            reg_shift = true;
         } else {
             uint8_t shift_amount = (cpu->curr_instr >> 7) & 0x1F;
             operand_2 = barrel_shifter(shift_type, rm_val, shift_amount, true);
@@ -820,10 +826,10 @@ static int arm_alu(void) {
     }
     }
 
-    if (s && rd == 0xF)
+    if (s && r15_transferred)
         cpu->registers.cpsr = get_psr_reg();
-    
-    return 1;
+
+    return (1 + r15_transferred) + reg_shift + r15_transferred;
 }
 
 static int arm_multiply(void) {
@@ -833,20 +839,25 @@ static int arm_multiply(void) {
     uint8_t rs = (cpu->curr_instr >> 8) & 0xF;
     uint8_t rm = cpu->curr_instr & 0xF;
 
+    Word rs_val = get_reg(rs);
+
+    int m = 4 - (((__builtin_clz(rs_val ^ ((int32_t)rs_val >> 31)) + 0x7) & ~0x7) >> 3);
+    if (m == 0) m = 4;
+
     switch ((cpu->curr_instr >> 21) & 0xF) {
     case 0x0: {
         DEBUG_PRINT(("MUL%s%s %s, %s, %s\n", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
         Word result = get_reg(rm) * get_reg(rs);
         if (s) set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
         set_reg(rd, result);
-        break;
+        return 1 + m;
     }
     case 0x1: {
         DEBUG_PRINT(("MLA%s %s, %s, %s, %s\n", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs), register_to_cstr(rn)))
         Word result = get_reg(rm) * get_reg(rs) + get_reg(rn);
         if (s) set_cc(result >> 31, result == 0, CC_UNMOD, CC_UNMOD);
         set_reg(rd, result);
-        break;
+        return 2 + m;
     }
     case 0x2:
         fprintf(stderr, "multiply opcode not implemented yet: %04X\n", (cpu->curr_instr >> 21) & 0xF);
@@ -856,39 +867,37 @@ static int arm_multiply(void) {
         DEBUG_PRINT(("UMULL%s%s %s, %s, %s, %s\n", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
         uint64_t result = (uint64_t)get_reg(rm) * (uint64_t)get_reg(rs);
         if (s) set_cc(result >> 63, result == 0, CC_UNMOD, CC_UNMOD);
-        set_reg(rn, result & ~0U);
-        set_reg(rd, (result >> 32) & ~0U);
-        break;
+        set_reg(rn, result & ~0);
+        set_reg(rd, (result >> 32) & ~0);
+        return 2 + m;
     }
     case 0x5:
         DEBUG_PRINT(("UMLAL%s%s %s, %s, %s, %s\n", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
         uint64_t result = (uint64_t)get_reg(rm) * (uint64_t)get_reg(rs) + (((uint64_t)get_reg(rd) << (uint64_t)32) | (uint64_t)get_reg(rn));
         if (s) set_cc(result >> 63, result == 0, CC_UNMOD, CC_UNMOD);
-        set_reg(rn, result & ~0U);
-        set_reg(rd, (result >> 32) & ~0U);
-        break;
+        set_reg(rn, result & ~0);
+        set_reg(rd, (result >> 32) & ~0);
+        return 3 + m;
     case 0x6: {
         DEBUG_PRINT(("SMULL%s%s %s, %s, %s, %s\n", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
         int64_t result = (int64_t)(int32_t)get_reg(rm) * (int64_t)(int32_t)get_reg(rs);
         if (s) set_cc(result >> 63, result == 0, CC_UNMOD, CC_UNMOD);
-        set_reg(rn, result & ~0U);
-        set_reg(rd, (result >> 32) & ~0U);
-        break;
+        set_reg(rn, result & ~0);
+        set_reg(rd, (result >> 32) & ~0);
+        return 2 + m;
     }
     case 0x7: {
         DEBUG_PRINT(("SMLAL%s%s %s, %s, %s, %s\n", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), s ? "S" : "", register_to_cstr(rn), register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rs)))
         int64_t result = (int64_t)(int32_t)get_reg(rm) * (int64_t)(int32_t)get_reg(rs) + ((int64_t)((uint64_t)get_reg(rd) << (uint64_t)32) | (int64_t)get_reg(rn));
         if (s) set_cc(result >> 63, result == 0, CC_UNMOD, CC_UNMOD);
-        set_reg(rn, result & ~0U);
-        set_reg(rd, (result >> 32) & ~0U);
-        break;
+        set_reg(rn, result & ~0);
+        set_reg(rd, (result >> 32) & ~0);
+        return 3 + m;
     }
     default:
         fprintf(stderr, "CPU Error: invalid opcode\n");
         exit(1);
     }
-
-    return 1;
 }
 
 // FRAGILE!!
@@ -928,12 +937,11 @@ static int arm_block_data_transfer(void) {
     // is written back to +/-40h since the register count is 16 (even though only 1 transfer occurs)
     if (empty_reg_list) {
         reg_list |= (1 << 0xF);
-        total_transfers = 16;
-        w = true;
-    }
-
-    if (w)
+        set_reg(rn, base_addr + (16 * base_addr_offset));
+        r15_transferred = true;
+    } else if (w) {
         set_reg(rn, base_addr + (total_transfers * base_addr_offset));
+    }
 
     uint8_t first_transferred_reg = __builtin_ffs(reg_list) - 1;
 
@@ -985,7 +993,9 @@ static int arm_block_data_transfer(void) {
     if (user_bank_transfer) 
         cpu->registers.cpsr = user_bank_transfer;
 
-    return 1;
+    if (l)
+        return (total_transfers + r15_transferred) + (1 + r15_transferred) + 1;
+    return (total_transfers - 1) + 2;
 }
 
 static int arm_halfword_data_transfer(void) {
@@ -1014,8 +1024,8 @@ static int arm_halfword_data_transfer(void) {
         case 0x1: {
             DEBUG_PRINT(("LDR%sH ", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr))))
             bool is_misaligned = addr & 1;
-            Word read_value = is_misaligned ? ROR(read_mem(cpu->mem, addr - 1, HALF_WORD_ACCESS), 8) 
-                : read_mem(cpu->mem, addr, HALF_WORD_ACCESS); 
+            Word read_value = is_misaligned ? ROR(read_mem(cpu->mem, addr - 1, HALFWORD_ACCESS), 8) 
+                : read_mem(cpu->mem, addr, HALFWORD_ACCESS); 
             set_reg(rd, read_value);
             break;
         }
@@ -1027,7 +1037,7 @@ static int arm_halfword_data_transfer(void) {
             DEBUG_PRINT(("LDR%sSH ", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr))))
             bool is_misaligned = addr & 1;
             Word read_value = is_misaligned ? (int32_t)(int8_t)read_mem(cpu->mem, addr, BYTE_ACCESS)
-                : (int32_t)(int16_t)read_mem(cpu->mem, addr, HALF_WORD_ACCESS);
+                : (int32_t)(int16_t)read_mem(cpu->mem, addr, HALFWORD_ACCESS);
             set_reg(rd, read_value);
             break;
         }
@@ -1036,7 +1046,7 @@ static int arm_halfword_data_transfer(void) {
         switch ((cpu->curr_instr >> 5) & 0x3) {
         case 0x1:
             DEBUG_PRINT(("STR%sH ", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr))))
-            write_mem(cpu->mem, addr, get_reg(rd), HALF_WORD_ACCESS);
+            write_mem(cpu->mem, addr, get_reg(rd), HALFWORD_ACCESS);
             break;
         case 0x2:
             DEBUG_PRINT(("LDR%sD ", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr))))
@@ -1079,7 +1089,11 @@ static int arm_halfword_data_transfer(void) {
     }
     DEBUG_PRINT(("\n"))
 
-    return 1;
+    bool r15_transferred = rd == 0xF;
+
+    if (l)
+        return 3 + (2 * r15_transferred);
+    return 2;
 }
 
 static int arm_single_data_transfer(void) {
@@ -1155,7 +1169,11 @@ static int arm_single_data_transfer(void) {
     }
     DEBUG_PRINT(("\n"))
 
-    return 1;
+    bool r15_transferred = rd == 0xF;
+
+    if (l)
+        return 3 + (2 * r15_transferred);
+    return 2;
 }
 
 static int arm_single_data_swap(void) {
@@ -1176,7 +1194,7 @@ static int arm_single_data_swap(void) {
     }
 
     DEBUG_PRINT(("SWP%s%s %s, %s, [%s]\n", cond_to_cstr(INSTR_COND_FIELD(cpu->curr_instr)), b ? "B" : "", register_to_cstr(rd), register_to_cstr(rm), register_to_cstr(rn)))
-    return 1;
+    return 4;
 }
 
 static int arm_msr(void) {
@@ -1229,7 +1247,7 @@ static int arm_software_interrupt(void) {
     cpu->registers.spsr_svc = cpu->registers.cpsr;
     SET_PROCESSOR_MODE(Supervisor)
     cpu->registers.r15 = PC_UPDATE(0x00000008);
-    return 1;
+    return 3;
 }
 
 // handles THUMB formats that cannot be decompressed to an ARM instruction (or at least "trivially")
@@ -1240,7 +1258,7 @@ static int thumb_handler(InstrType type) {
         uint16_t nn = (cpu->curr_instr & 0xFF) << 2; // 10-bit unsigned immediate offset
         DEBUG_PRINT(("LDR %s, [pc, #0x%X]\n", register_to_cstr(rd), nn))
         set_reg(rd, read_mem(cpu->mem, (cpu->registers.r15 & ~0x2) + nn, WORD_ACCESS));
-        break;
+        return 3;
     }
     case THUMB_RELATIVE_ADDRESS: { // format 12
         uint8_t rd = (cpu->curr_instr >> 8) & 0x7;
@@ -1256,13 +1274,13 @@ static int thumb_handler(InstrType type) {
             set_reg(rd, get_reg(SP_REG) + nn);
             break;
         }
-        break;
+        return 1;
     }
     case THUMB_LONG_BRANCH_1: { // format 19 (H = 0)
         Word upper_half_offset = (int32_t)((cpu->curr_instr & 0x7FF) << 21) >> 21;
         set_reg(LR_REG, cpu->registers.r15 + (upper_half_offset << 12));
         DEBUG_PRINT(("MOV lr, #0x%08X [BL 1]\n", cpu->registers.r15 + (upper_half_offset << 12)));
-        break;
+        return 1;
     }
     case THUMB_LONG_BRANCH_2: { // format 19 (H = 1)
         Word lower_half_offset = cpu->curr_instr & 0x7FF;
@@ -1282,14 +1300,12 @@ static int thumb_handler(InstrType type) {
         set_reg(LR_REG, (curr_pc - 2) | 1);
 
         DEBUG_PRINT(("MOV pc, #0x%08X | lr, #0x%08X [BL 2]\n", cpu->registers.r15, get_reg(LR_REG)))
-        break;
+        return 3;
     }
     default:
         fprintf(stderr, "unhandled thumb instruction type\n");
         exit(1);
     }
-
-    return 1;
 }
 
 static int arm_handler(InstrType type) {
@@ -1339,7 +1355,7 @@ static int execute(void) {
         cycles_consumed = arm_handler(type);
     }
 
-    return 1;
+    return cycles_consumed;
 }
 
 // NOTE: change in the future so CPU is not a malloc'd object

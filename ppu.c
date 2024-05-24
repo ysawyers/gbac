@@ -80,6 +80,11 @@ uint16_t reg_bldy;
 int reg_vcount = 0; // LCY
 int cycles = 0;
 
+bool is_rendering_bitmap(void) {
+    uint8_t mode = (reg_dispcnt >> 8) & 0x1F;
+    return (mode == 0x3) || (mode == 0x4) || (mode == 0x5);
+}
+
 static void render_scanline(void) {
     if (DCNT_BLANK) {
         for (int row = 0; row < FRAME_WIDTH; row++) 

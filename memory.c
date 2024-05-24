@@ -159,12 +159,18 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
 
     vram_reg:
         addr = (addr - 0x06000000) & 0x1FFFF;
+        if (addr >= 0x18000 && addr <= 0x1FFFF) addr -= 0x8000;
+
         if (access_size == 1) {
             // byte writes to obj vram are ignored
-            if (addr > 0x14000) return;
+            if (addr >= 0x14000) return;
 
-            // byte writes to the current background are duplicated across the halfword 
-            if (((reg_dispcnt >> 4) & 1) ^ (addr < 0xA000)) {
+            uint32_t bg_vram_size = 0x10000;
+            if (is_rendering_bitmap())
+                bg_vram_size = 0x14000;
+
+            // byte writes to bg vram are duplicated across the halfword
+            if (addr < bg_vram_size) {
                 val = (val << 8) | val;
                 access_size = 2;
             } else {
@@ -172,11 +178,7 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
             }
         }
 
-        if (addr >= 0x18000 && addr <= 0x1FFFF) {
-            memcpy(vram + (addr - 0x8000), &val, access_size);
-        } else {
-            memcpy(vram + addr, &val, access_size);
-        }
+        memcpy(vram + addr, &val, access_size);
         return;
 
     oam_reg:
