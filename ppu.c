@@ -77,13 +77,13 @@ uint16_t reg_bldcnt;
 uint16_t reg_bldalpha;
 uint16_t reg_bldy;
 
-uint8_t reg_vcount = 0; // LCY
+int reg_vcount = 0; // LCY
+int cycles = 0;
 
-size_t cycles = 0;
-
-static inline void render_scanline(void) {
+static void render_scanline(void) {
     if (DCNT_BLANK) {
-        for (int row = 0; row < FRAME_WIDTH; row++) frame[reg_vcount][row] = WHITE_PIXEL;
+        for (int row = 0; row < FRAME_WIDTH; row++) 
+            frame[reg_vcount][row] = WHITE_PIXEL;
         return;
     }
 
@@ -104,13 +104,17 @@ static inline void render_scanline(void) {
                     memcpy(&frame[reg_vcount][row], vram + (reg_vcount * (FRAME_WIDTH * sizeof(Pixel))) + (row * sizeof(Pixel)), sizeof(Pixel));
             break;
         case 0x4:
-            if (DCNT_BG2)
+            if (DCNT_BG2) {
+                uint8_t *vram_base_ptr = vram;
+                if ((reg_dispcnt >> 4) & 1) vram_base_ptr += 0xA000;
+
                 for (int row = 0; row < FRAME_WIDTH; row++) {
                     // each byte in vram is interpreted as a pallete index holding a pixels color
-                    uint8_t pallete_idx = *(vram + (reg_vcount * FRAME_WIDTH) + row);
+                    uint8_t pallete_idx = *(vram_base_ptr + (reg_vcount * FRAME_WIDTH) + row);
                     // copy the 15bpp color to the associated pixel on the frame
                     memcpy(&frame[reg_vcount][row], &pallete_ram[pallete_idx * sizeof(Pixel)], sizeof(Pixel));
                 }
+            }
             break;
         case 0x5:
             fprintf(stderr, "bitmap mode 5 not implemented yet\n");
