@@ -841,7 +841,10 @@ static int arm_multiply(void) {
 
     Word rs_val = get_reg(rs);
 
-    int m = 4 - (((__builtin_clz(rs_val ^ ((int32_t)rs_val >> 31)) + 0x7) & ~0x7) >> 3);
+    // __builtin_clz() has UB for an argument of 0 so a check must be done beforehand
+    Word val_leading_zeros = rs_val ^ ((int32_t)rs_val >> 31);
+    int m = val_leading_zeros == 0 ? 4
+        : 4 - (((__builtin_clz(val_leading_zeros) + 0x7) & ~0x7) >> 3);
     if (m == 0) m = 4;
 
     switch ((cpu->curr_instr >> 21) & 0xF) {
