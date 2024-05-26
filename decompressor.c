@@ -95,7 +95,7 @@ InstrType thumb_decompress_4(HalfWord thumb_instr, Word *arm_instr) {
         translation |= (rd << 8);
 
         *arm_instr = translation;
-        return Multiply;
+        return MULTIPLY;
     }
 
     translation |= rs;
@@ -162,7 +162,7 @@ InstrType thumb_decompress_7(HalfWord thumb_instr, Word *arm_instr) {
     translation |= ro;
 
     *arm_instr = translation;
-    return SingleDataTransfer;
+    return SINGLE_TRANSFER;
 }
 
 InstrType thumb_decompress_8(HalfWord thumb_instr, Word *arm_instr) {
@@ -182,7 +182,7 @@ InstrType thumb_decompress_8(HalfWord thumb_instr, Word *arm_instr) {
     translation |= ro;
 
     *arm_instr = translation;
-    return HalfwordDataTransfer;
+    return HALFWORD_TRANSFER;
 }
 
 InstrType thumb_decompress_9(HalfWord thumb_instr, Word *arm_instr) {
@@ -201,7 +201,7 @@ InstrType thumb_decompress_9(HalfWord thumb_instr, Word *arm_instr) {
     translation |= nn;
 
     *arm_instr = translation;
-    return SingleDataTransfer;
+    return SINGLE_TRANSFER;
 }
 
 InstrType thumb_decompress_10(HalfWord thumb_instr, Word *arm_instr) {
@@ -219,7 +219,7 @@ InstrType thumb_decompress_10(HalfWord thumb_instr, Word *arm_instr) {
     translation |= (nn & 0xF);
 
     *arm_instr = translation;
-    return HalfwordDataTransfer;
+    return HALFWORD_TRANSFER;
 }
 
 InstrType thumb_decompress_11(HalfWord thumb_instr, Word *arm_instr) {
@@ -234,7 +234,7 @@ InstrType thumb_decompress_11(HalfWord thumb_instr, Word *arm_instr) {
     translation |= nn;
 
     *arm_instr = translation;
-    return SingleDataTransfer;
+    return SINGLE_TRANSFER;
 }
 
 InstrType thumb_decompress_13(HalfWord thumb_instr, Word *arm_instr) {
@@ -264,7 +264,7 @@ InstrType thumb_decompress_14(HalfWord thumb_instr, Word *arm_instr) {
     translation |= ((pc_or_lr & 1) << (0xE | opcode));
 
     *arm_instr = translation;
-    return BlockDataTransfer;
+    return BLOCK_TRANSFER;
 }
 
 InstrType thumb_decompress_15(HalfWord thumb_instr, Word *arm_instr) {
@@ -279,7 +279,7 @@ InstrType thumb_decompress_15(HalfWord thumb_instr, Word *arm_instr) {
     translation |= reg_list;
 
     *arm_instr = translation;
-    return BlockDataTransfer;
+    return BLOCK_TRANSFER;
 }
 
 InstrType thumb_decompress_16(HalfWord thumb_instr, Word *arm_instr) {

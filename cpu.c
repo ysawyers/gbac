@@ -515,19 +515,19 @@ static InstrType decode(Word instr) {
             case 0x9:
                 switch ((instr >> 23) & 0x3) {
                 case 0x0:
-                case 0x1: return Multiply;
+                case 0x1: return MULTIPLY;
                 case 0x2: return SWP;
                 default: return ARM_BAD_INSTR;
                 }
             case 0xB:
             case 0xD: 
-            case 0xF: return HalfwordDataTransfer;
+            case 0xF: return HALFWORD_TRANSFER;
             default: goto psr_transfer_or_alu_op;
             }
         case 0x1: goto psr_transfer_or_alu_op;
         case 0x2:
-        case 0x3: return SingleDataTransfer;
-        case 0x4: return BlockDataTransfer;
+        case 0x3: return SINGLE_TRANSFER;
+        case 0x4: return BLOCK_TRANSFER;
         case 0x5: return BRANCH;
         case 0x6:
             fprintf(stderr, "CPU Error [ARM]: coprocessor instructions not supported on GBA!\n");
@@ -1321,12 +1321,12 @@ static int arm_handler(InstrType type) {
     case NOP: return 1;
     case BRANCH: return arm_branch();
     case BRANCH_X: return arm_branch_exchange();
-    case BlockDataTransfer: return arm_block_data_transfer();
+    case BLOCK_TRANSFER: return arm_block_data_transfer();
     case ALU: return arm_alu();
-    case HalfwordDataTransfer: return arm_halfword_data_transfer();
-    case SingleDataTransfer: return arm_single_data_transfer();
+    case HALFWORD_TRANSFER: return arm_halfword_data_transfer();
+    case SINGLE_TRANSFER: return arm_single_data_transfer();
     case SWI: return arm_software_interrupt();
-    case Multiply: return arm_multiply();
+    case MULTIPLY: return arm_multiply();
     case MSR: return arm_msr();
     case MRS: return arm_mrs();
     case SWP: return arm_single_data_swap();

@@ -85,6 +85,65 @@ bool is_rendering_bitmap(void) {
     return (mode == 0x3) || (mode == 0x4) || (mode == 0x5);
 }
 
+// pulled from tonc as a better alternative for calculating screen
+// entry based on tx (tile_x), ty (tile_y) https://www.coranac.com/tonc/text/regbg.htm
+static int compute_se_idx(int tile_x, int tile_y, bool bg_reg_64x64) {
+    int se_size = 2;
+    int se_idx = (tile_y * (32 * se_size)) + (tile_x * se_size);
+
+    // TODO: values grabbed from tonc here may very well be wrong
+    // not sure if they were computed assuming 16-bit elements or
+    // if they have the 2 byte width accounted for, come back to this
+    if (tile_x >= 32)
+        se_idx += 0x03E0;
+    if (tile_y >= 32 && bg_reg_64x64)
+        se_idx += 0x0400;
+
+    return se_idx;
+}
+
+static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg_bgvofs) {
+    int num_tiles_x = 32 * (1 + ((reg_bgcnt >> 0xE) & 1));
+    int num_tiles_y = 32 * (1 + ((reg_bgcnt >> 0xF) & 1));
+
+    uint8_t *screen_entries = vram + (((reg_bgcnt >> 0x8) & 0x1F) * 0x800);
+    uint8_t *tile_set = vram + (((reg_bgcnt >> 0x2) & 0x3) * 0x4000);
+    bool color_pallete = (reg_bgcnt >> 0x7) & 1;
+    bool mosaic_enable = (reg_bgcnt >> 0x6) & 1;
+
+    // top left coordinates of the screen
+    uint16_t scroll_x = reg_bghofs & 0x3FF;
+    uint16_t scroll_y = reg_bgvofs & 0x3FF;
+
+    if (mosaic_enable) {
+        printf("cooked 1\n");
+        exit(1);
+    }
+
+    // number of pixels rendered for the current scanline
+    int scanline_x = 0;
+
+    for (int tile_x = scroll_x; tile_x < num_tiles_x; tile_x++) {
+        uint16_t screen_entry;
+
+        int tile_y = ((reg_vcount & ~0x7) >> 3);
+        memcpy(&screen_entry, &screen_entries[compute_se_idx(tile_x, scroll_y + tile_y, num_tiles_y == 64)], sizeof(screen_entry));
+
+        int tile_id = screen_entry & 0x3FF;
+        int pallete_id = tile_set[tile_id * 0x20];
+
+        if (!color_pallete) // map entry supplies top 4 bits, tile data supplies bottom 4 bits 
+            pallete_id = (((screen_entry >> 0xC) & 0xF) << 8) | (pallete_id & 0xF);
+
+        if (scanline_x < 240) {
+            for (int i = 0; i < 8; i++)
+                memcpy(&frame[reg_vcount][scanline_x++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
+        } else {
+            break;
+        }
+    }
+}
+
 static void render_scanline(void) {
     if (DCNT_BLANK) {
         for (int row = 0; row < FRAME_WIDTH; row++) 
@@ -97,6 +156,11 @@ static void render_scanline(void) {
         switch (DCNT_MODE) {
         // tilemap modes
         case 0x0:
+            if (DCNT_BG0) render_text_bg(reg_bg0cnt, reg_bg0hofs, reg_bg0vofs);
+            if (DCNT_BG1) render_text_bg(reg_bg1cnt, reg_bg1hofs, reg_bg1vofs);
+            if (DCNT_BG2) render_text_bg(reg_bg2cnt, reg_bg2hofs, reg_bg2vofs);
+            if (DCNT_BG3) render_text_bg(reg_bg3cnt, reg_bg3hofs, reg_bg3vofs);
+            break;
         case 0x1:
         case 0x2:
             fprintf(stderr, "video mode: %d not implemented yet\n", DCNT_MODE);
@@ -105,19 +169,19 @@ static void render_scanline(void) {
         // bitmap modes
         case 0x3:
             if (DCNT_BG2)
-                for (int row = 0; row < FRAME_WIDTH; row++) // pixels for the frame are stored directly in vram
-                    memcpy(&frame[reg_vcount][row], vram + (reg_vcount * (FRAME_WIDTH * sizeof(Pixel))) + (row * sizeof(Pixel)), sizeof(Pixel));
+                for (int col = 0; col < FRAME_WIDTH; col++) // pixels for the frame are stored directly in vram
+                    memcpy(&frame[reg_vcount][col], vram + (reg_vcount * (FRAME_WIDTH * sizeof(Pixel))) + (col * sizeof(Pixel)), sizeof(Pixel));
             break;
         case 0x4:
             if (DCNT_BG2) {
                 uint8_t *vram_base_ptr = vram;
                 if ((reg_dispcnt >> 4) & 1) vram_base_ptr += 0xA000;
 
-                for (int row = 0; row < FRAME_WIDTH; row++) {
+                for (int col = 0; col < FRAME_WIDTH; col++) {
                     // each byte in vram is interpreted as a pallete index holding a pixels color
-                    uint8_t pallete_idx = *(vram_base_ptr + (reg_vcount * FRAME_WIDTH) + row);
+                    uint8_t pallete_idx = *(vram_base_ptr + (reg_vcount * FRAME_WIDTH) + col);
                     // copy the 15bpp color to the associated pixel on the frame
-                    memcpy(&frame[reg_vcount][row], &pallete_ram[pallete_idx * sizeof(Pixel)], sizeof(Pixel));
+                    memcpy(&frame[reg_vcount][col], &pallete_ram[pallete_idx * sizeof(Pixel)], sizeof(Pixel));
                 }
             }
             break;

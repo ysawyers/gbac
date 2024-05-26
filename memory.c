@@ -112,6 +112,9 @@ uint32_t read_mem(Memory *mem, uint32_t addr, size_t access_size) {
     return word;
 }
 
+// TODO: depending on profiling in the future an easy optimization
+// could be to create a seperate write_byte function to handle the edge cases
+// and reduce the amount of branching for each instruction
 void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
     FORCE_MEMORY_ALIGN(addr, access_size);
 
