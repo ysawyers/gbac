@@ -130,9 +130,10 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
         memcpy(&screen_entry, &screen_entries[compute_se_idx(tile_x, scroll_y + tile_y, num_tiles_y == 64)], sizeof(screen_entry));
 
         int tile_id = screen_entry & 0x3FF;
-        int pallete_id = tile_set[tile_id * 0x20];
+        // multipled by 0x40 for 8bpp otherwise 0x20
+        int pallete_id = tile_set[tile_id * (0x20 << color_pallete)];
 
-        if (!color_pallete) // map entry supplies top 4 bits, tile data supplies bottom 4 bits 
+        if (!color_pallete) // 4bpp: map entry supplies top 4 bits, tile data supplies bottom 4 bits 
             pallete_id = (((screen_entry >> 0xC) & 0xF) << 8) | (pallete_id & 0xF);
 
         if (scanline_x < 240) {
