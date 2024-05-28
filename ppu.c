@@ -21,6 +21,8 @@
 #define DCNT_BG3 ((reg_dispcnt >> 0xB) & 1)
 #define DCNT_OBJ ((reg_dispcnt >> 0xC) & 1)
 
+#define BGCNT_PRIO(bgcnt) (bgcnt & 0x3)
+
 #define CYCLES_PER_SCANLINE 1232
 #define CYCLES_PER_HDRAW    1006
 
@@ -85,19 +87,15 @@ bool is_rendering_bitmap(void) {
     return (mode == 0x3) || (mode == 0x4) || (mode == 0x5);
 }
 
-// pulled from tonc as a better alternative for calculating screen
-// entry based on tx (tile_x), ty (tile_y) https://www.coranac.com/tonc/text/regbg.htm
+// referenced from https://www.coranac.com/tonc/text/regbg.htm
+// terms here are multiplied by 2 since each screen entry is 2 bytes (uint16_t)
 static int compute_se_idx(int tile_x, int tile_y, bool bg_reg_64x64) {
-    int se_size = 2;
-    int se_idx = (tile_y * (32 * se_size)) + (tile_x * se_size);
+    int se_idx = (tile_y * (32 * 2)) + (tile_x * 2);
 
-    // TODO: values grabbed from tonc here may very well be wrong
-    // not sure if they were computed assuming 16-bit elements or
-    // if they have the 2 byte width accounted for, come back to this
     if (tile_x >= 32)
-        se_idx += 0x03E0;
+        se_idx += (0x03E0 * 2);
     if (tile_y >= 32 && bg_reg_64x64)
-        se_idx += 0x0400;
+        se_idx += (0x0400 * 2);
 
     return se_idx;
 }
@@ -106,7 +104,7 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
     int num_tiles_x = 32 * (1 + ((reg_bgcnt >> 0xE) & 1));
     int num_tiles_y = 32 * (1 + ((reg_bgcnt >> 0xF) & 1));
 
-    uint8_t *screen_entries = vram + (((reg_bgcnt >> 0x8) & 0x1F) * 0x800);
+    uint8_t *tile_map = vram + (((reg_bgcnt >> 0x8) & 0x1F) * 0x800);
     uint8_t *tile_set = vram + (((reg_bgcnt >> 0x2) & 0x3) * 0x4000);
     bool color_pallete = (reg_bgcnt >> 0x7) & 1;
     bool mosaic_enable = (reg_bgcnt >> 0x6) & 1;
@@ -123,11 +121,13 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
     // number of pixels rendered for the current scanline
     int scanline_x = 0;
 
-    for (int tile_x = scroll_x; tile_x < num_tiles_x; tile_x++) {
+    int tile_y = ((reg_vcount & ~7) / 8) + ((scroll_y & ~7) / 8);
+    int tile_x = ((scroll_x & ~7) / 8);
+
+    for (; tile_x < num_tiles_x; tile_x++) {
         uint16_t screen_entry;
 
-        int tile_y = ((reg_vcount & ~0x7) >> 3);
-        memcpy(&screen_entry, &screen_entries[compute_se_idx(tile_x, scroll_y + tile_y, num_tiles_y == 64)], sizeof(screen_entry));
+        memcpy(&screen_entry, &tile_map[compute_se_idx(tile_x, tile_y, num_tiles_y == 64)], sizeof(screen_entry));
 
         int tile_id = screen_entry & 0x3FF;
         // multipled by 0x40 for 8bpp otherwise 0x20
@@ -136,16 +136,15 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
         if (!color_pallete) // 4bpp: map entry supplies top 4 bits, tile data supplies bottom 4 bits 
             pallete_id = (((screen_entry >> 0xC) & 0xF) << 8) | (pallete_id & 0xF);
 
-        if (scanline_x < 240) {
-            for (int i = 0; i < 8; i++)
-                memcpy(&frame[reg_vcount][scanline_x++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
-        } else {
-            break;
+        for (int i = scanline_x ? 0 : (scroll_x - (scroll_x & ~7)); i < 8; i++) {
+            if (scanline_x >= FRAME_WIDTH) return;
+            memcpy(&frame[reg_vcount][scanline_x++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
         }
     }
 }
 
 static void render_scanline(void) {
+    // used to manage rendering priorities
     if (DCNT_BLANK) {
         for (int row = 0; row < FRAME_WIDTH; row++) 
             frame[reg_vcount][row] = WHITE_PIXEL;
@@ -153,15 +152,36 @@ static void render_scanline(void) {
     }
 
     // check if any rendering enable bits are set
-    if ((reg_dispcnt >> 8) & 0x1F) {
+    if ((reg_dispcnt >> 8) & 0xFF) {
         switch (DCNT_MODE) {
         // tilemap modes
-        case 0x0:
-            if (DCNT_BG0) render_text_bg(reg_bg0cnt, reg_bg0hofs, reg_bg0vofs);
-            if (DCNT_BG1) render_text_bg(reg_bg1cnt, reg_bg1hofs, reg_bg1vofs);
-            if (DCNT_BG2) render_text_bg(reg_bg2cnt, reg_bg2hofs, reg_bg2vofs);
-            if (DCNT_BG3) render_text_bg(reg_bg3cnt, reg_bg3hofs, reg_bg3vofs);
+        case 0x0: {
+            int prio = 0;
+
+            if (DCNT_BG0) {
+                prio = BGCNT_PRIO(reg_bg0cnt);
+                render_text_bg(reg_bg0cnt, reg_bg0hofs, reg_bg0vofs);
+            }
+
+            int bg1_prio = BGCNT_PRIO(reg_bg1cnt);
+            if (DCNT_BG1 && (bg1_prio > prio)) {
+                prio = bg1_prio;
+                render_text_bg(reg_bg1cnt, reg_bg1hofs, reg_bg1vofs);
+            }
+
+            int bg2_prio = BGCNT_PRIO(reg_bg2cnt);
+            if (DCNT_BG2 && (bg2_prio > prio)) {
+                prio = bg2_prio;
+                render_text_bg(reg_bg2cnt, reg_bg2hofs, reg_bg2vofs);
+            }
+
+            int bg3_prio = BGCNT_PRIO(reg_bg3cnt);
+            if (DCNT_BG3 && (bg3_prio > prio)) {
+                prio = bg3_prio;
+                render_text_bg(reg_bg3cnt, reg_bg3hofs, reg_bg3vofs);
+            } 
             break;
+        }
         case 0x1:
         case 0x2:
             fprintf(stderr, "video mode: %d not implemented yet\n", DCNT_MODE);
@@ -169,14 +189,20 @@ static void render_scanline(void) {
 
         // bitmap modes
         case 0x3:
-            if (DCNT_BG2)
+            if (DCNT_BG2) {
+                uint8_t *vram_base_ptr = vram;
+                if (DCNT_PAGE)
+                    vram_base_ptr += 0xA000;
+
                 for (int col = 0; col < FRAME_WIDTH; col++) // pixels for the frame are stored directly in vram
                     memcpy(&frame[reg_vcount][col], vram + (reg_vcount * (FRAME_WIDTH * sizeof(Pixel))) + (col * sizeof(Pixel)), sizeof(Pixel));
+            }
             break;
         case 0x4:
             if (DCNT_BG2) {
                 uint8_t *vram_base_ptr = vram;
-                if ((reg_dispcnt >> 4) & 1) vram_base_ptr += 0xA000;
+                if (DCNT_PAGE) 
+                    vram_base_ptr += 0xA000;
 
                 for (int col = 0; col < FRAME_WIDTH; col++) {
                     // each byte in vram is interpreted as a pallete index holding a pixels color
@@ -203,30 +229,32 @@ static void render_scanline(void) {
 void tick_ppu(void) {
     cycles += 1;
 
-    // VBlank mode starts for the last "68 scanlines"
+    // vblank
     if (reg_vcount >= FRAME_HEIGHT) {
-        reg_dispstat |= 0x0001;
+        reg_dispstat |= 3;
 
         if ((cycles % CYCLES_PER_SCANLINE) == 0) {
-            // check if frame is fully rendered
             if (++reg_vcount == 228) {
-                reg_dispstat &= 0xFFFE; // VBlank has ended and VDraw will start for the next frame
-                reg_vcount = 0;
+                reg_dispstat &= ~3;
                 cycles = 0;
+                reg_vcount = 0;
             };
         }
         return;
     }
 
-    // from "research" seems like rendering 32 cycles into H-draw 
+    // from "research" seems like rendering 32 cycles into hdraw 
     // creates best results for scanline PPU
     if (cycles == 32) 
         render_scanline();
 
+    if (cycles == 1006) // start of hblank
+        reg_dispstat |= 2;
+
     if (cycles == CYCLES_PER_SCANLINE) {
-        reg_dispstat &= 0xFFFE; // HBlank has ended and VDraw resumes
-        cycles = 0;             // reset every 1232 cycles during VDraw
-        reg_vcount += 1;        // increment to render next scanline
+        reg_dispstat &= ~3;   // hdraw and vdraw will start next cycle
+        cycles = 0;
+        reg_vcount += 1;
     }
 };
 
