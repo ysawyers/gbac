@@ -231,7 +231,7 @@ static Bit get_cc(Flag cc) {
 static void set_cc(uint8_t n, int z, int c, int v) {
     Word curr_psr = get_psr_reg();
 
-    if (n != CC_UNMOD) curr_psr = n ? (1 << 31) | curr_psr : ~(1 << 31) & curr_psr;
+    if (n != CC_UNMOD) curr_psr = n ? (UINT32_C(1) << 31) | curr_psr : ~(UINT32_C(1) << 31) & curr_psr;
     if (z != CC_UNMOD) curr_psr = z ? (1 << 30) | curr_psr : ~(1 << 30) & curr_psr;
     if (c != CC_UNMOD) curr_psr = c ? (1 << 29) | curr_psr : ~(1 << 29) & curr_psr;
     if (v != CC_UNMOD) curr_psr = v ? (1 << 28) | curr_psr : ~(1 << 28) & curr_psr;
@@ -639,7 +639,7 @@ static Word barrel_shifter(ShiftType shift_type, Word operand_2, size_t shift, b
 
 static int arm_branch(void) {
     Bit with_link = (cpu->curr_instr >> 24) & 1;
-    int32_t offset = ((int32_t)((cpu->curr_instr & 0xFFFFFF) << 8) >> 8) << 2; // sign extended 24-bit offset shifted left by 2
+    int32_t offset = (uint32_t)((int32_t)((cpu->curr_instr & 0xFFFFFF) << 8) >> 8) << 2; // sign extended 24-bit offset shifted left by 2
 
     // adjust for step by 2 instead of 4 for translated THUMB immediates
     if (THUMB_ACTIVATED) 

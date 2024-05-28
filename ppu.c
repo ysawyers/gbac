@@ -94,8 +94,9 @@ static int compute_se_idx(int tile_x, int tile_y, bool bg_reg_64x64) {
 
     if (tile_x >= 32)
         se_idx += (0x03E0 * 2);
-    if (tile_y >= 32 && bg_reg_64x64)
+    if (tile_y >= 32) {
         se_idx += (0x0400 * 2);
+    }
 
     return se_idx;
 }
@@ -108,38 +109,53 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
     uint8_t *tile_set = vram + (((reg_bgcnt >> 0x2) & 0x3) * 0x4000);
     bool color_pallete = (reg_bgcnt >> 0x7) & 1;
     bool mosaic_enable = (reg_bgcnt >> 0x6) & 1;
-
-    // top left coordinates of the screen
-    uint16_t scroll_x = reg_bghofs & 0x3FF;
-    uint16_t scroll_y = reg_bgvofs & 0x3FF;
+    int bpp = 4 << color_pallete;
 
     if (mosaic_enable) {
         printf("cooked 1\n");
         exit(1);
     }
 
-    // number of pixels rendered for the current scanline
-    int scanline_x = 0;
+    // top left coordinates of the screen
+    uint16_t scroll_x = reg_bghofs & 0x3FF;
+    uint16_t scroll_y = reg_bgvofs & 0x3FF;
 
-    int tile_y = ((reg_vcount & ~7) / 8) + ((scroll_y & ~7) / 8);
-    int tile_x = ((scroll_x & ~7) / 8);
+    int tile_y_offset = ((reg_vcount & ~7) / 8);
+    int tile_y = (((scroll_y & ~7) / 8) + tile_y_offset) & (num_tiles_y - 1);
+    int tile_x = ((scroll_x & ~7) / 8) & (num_tiles_x - 1);
 
-    for (; tile_x < num_tiles_x; tile_x++) {
+    int scanline_px_rendered = 0;
+
+    while (true) {
         uint16_t screen_entry;
-
         memcpy(&screen_entry, &tile_map[compute_se_idx(tile_x, tile_y, num_tiles_y == 64)], sizeof(screen_entry));
 
         int tile_id = screen_entry & 0x3FF;
-        // multipled by 0x40 for 8bpp otherwise 0x20
-        int pallete_id = tile_set[tile_id * (0x20 << color_pallete)];
+        uint8_t *tile = tile_set + (tile_id * (0x20 << color_pallete));
+        uint8_t pallete_bank = (((screen_entry >> 0xC) & 0xF) << 4); // only used in 4bpp
 
-        if (!color_pallete) // 4bpp: map entry supplies top 4 bits, tile data supplies bottom 4 bits 
-            pallete_id = (((screen_entry >> 0xC) & 0xF) << 8) | (pallete_id & 0xF);
+        tile += (bpp * (reg_vcount - (reg_vcount & ~7)));
 
-        for (int i = scanline_x ? 0 : (scroll_x - (scroll_x & ~7)); i < 8; i++) {
-            if (scanline_x >= FRAME_WIDTH) return;
-            memcpy(&frame[reg_vcount][scanline_x++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
+        for (int i = 0; i < bpp; i++) {
+            if (!color_pallete) {
+                for (int nibble = 1; nibble >= 0; nibble--) {
+                    // enables pixel scrolling in the x-direction
+                    if (scanline_px_rendered == 0 && ((scroll_x - (scroll_x & ~7)) > (i*2 + (!nibble + 1)))) break;
+
+                    if (scanline_px_rendered < FRAME_WIDTH) {
+                        uint8_t pallete_id = pallete_bank | ((tile[i] >> (nibble * 4)) & 0xF);
+                        memcpy(&frame[reg_vcount][scanline_px_rendered++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
+                    } else {
+                        return;
+                    }
+                }
+            } else {
+                printf("color pallete bit is set\n");
+                exit(1);
+            }
         }
+
+        tile_x = (tile_x + 1) & (num_tiles_x - 1);
     }
 }
 
