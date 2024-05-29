@@ -112,11 +112,10 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
     int bpp = 4 << color_pallete;
 
     if (mosaic_enable) {
-        printf("cooked 1\n");
+        printf("unimplemented: mosaic bit set\n");
         exit(1);
     }
 
-    // top left coordinates of the screen
     uint16_t scroll_x = reg_bghofs & 0x3FF;
     uint16_t scroll_y = reg_bgvofs & 0x3FF;
 
@@ -134,24 +133,35 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
         uint8_t *tile = tile_set + (tile_id * (0x20 << color_pallete));
         uint8_t pallete_bank = (((screen_entry >> 0xC) & 0xF) << 4); // only used in 4bpp
 
-        tile += (bpp * (reg_vcount - (reg_vcount & ~7)));
+        bool horizontal_flip = (screen_entry >> 0xA) & 1;
+        bool vertical_flip = (screen_entry >> 0xB) & 1;
 
-        for (int i = 0; i < bpp; i++) {
-            if (!color_pallete) {
-                for (int nibble = 1; nibble >= 0; nibble--) {
-                    // enables pixel scrolling in the x-direction
-                    if (scanline_px_rendered == 0 && ((scroll_x - (scroll_x & ~7)) > (i*2 + (!nibble + 1)))) break;
+        int tile_row_to_render = (reg_vcount - (reg_vcount & ~7));
+        tile += bpp * (vertical_flip ? 7 - tile_row_to_render : tile_row_to_render);
 
-                    if (scanline_px_rendered < FRAME_WIDTH) {
-                        uint8_t pallete_id = pallete_bank | ((tile[i] >> (nibble * 4)) & 0xF);
-                        memcpy(&frame[reg_vcount][scanline_px_rendered++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
-                    } else {
-                        return;
-                    }
+        int start, end, step;
+
+        if (horizontal_flip) {
+            start = bpp - 1;
+            end = -1;
+            step = -1;
+        } else {
+            start = 0;
+            end = bpp;
+            step = 1;
+        }
+
+        if (color_pallete) {
+            printf("unimplemented: color pallete bit set\n");
+            exit(1);
+        } else {
+            for (int i = start; i != end; i += step) {
+                for (int nibble = horizontal_flip; nibble != (!horizontal_flip + step); nibble += step) {
+                    if (scanline_px_rendered >= FRAME_WIDTH) return;
+
+                    uint8_t pallete_id = pallete_bank | ((tile[i] >> (nibble * 4)) & 0x0F);
+                    memcpy(&frame[reg_vcount][scanline_px_rendered++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
                 }
-            } else {
-                printf("color pallete bit is set\n");
-                exit(1);
             }
         }
 

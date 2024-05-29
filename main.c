@@ -66,6 +66,9 @@ int main(int argc, char **argv) {
     
     bool running = true;
 
+    time_t start_t, end_t;
+    double diff_t;
+
     while(running)
     {
         uint16_t key_input = 0xFFFF;
@@ -107,7 +110,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        // TODO: cap at 60 FPS
         sdl_render_frame(renderer, compute_frame(key_input));
     }
 
