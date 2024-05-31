@@ -3,22 +3,23 @@
 
 #include "ppu.h"
 
-typedef struct {
-    uint8_t bios[0x4000];
-    uint8_t external_wram[0x40000];
-    uint8_t internal_wram[0x8000];
-    uint8_t rom[0x2000000];
+extern uint8_t bios[0x4000];
+extern uint8_t external_wram[0x40000];
+extern uint8_t internal_wram[0x8000];
+extern uint8_t rom[0x2000000];
 
-    uint16_t reg_ime;
-    uint16_t reg_keyinput;
-} Memory;
+extern uint16_t reg_ime;
+extern uint16_t reg_keyinput;
 
-Memory* init_mem(const char *bios_file, const char *rom_file);
+void load_bios(char *bios_file);
+void load_rom(char *rom_file);
 
-// read size of (1, 2, or 4) bytes from memory at given address
-uint32_t read_mem(Memory *mem, uint32_t addr, size_t size);
+uint32_t read_word(uint32_t addr);
+uint16_t read_halfword(uint32_t addr);
+uint8_t read_byte(uint32_t addr);
 
-// write size of (1, 2, or 4) bytes to memory at given address
-void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t size);
+void write_word(uint32_t addr, uint32_t word);
+void write_halfword(uint32_t addr, uint16_t halfword);
+void write_byte(uint32_t addr, uint8_t byte);
 
 #endif

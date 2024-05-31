@@ -6,8 +6,6 @@
 #define FRAME_WIDTH  240
 #define FRAME_HEIGHT 160
 
-#define WHITE_PIXEL 0xFFFF
-
 #define DCNT_MODE    (reg_dispcnt & 0x7)
 #define DCNT_GB      ((reg_dispcnt >> 3) & 1)
 #define DCNT_PAGE    ((reg_dispcnt >> 4) & 1)
@@ -33,6 +31,7 @@ Pixel frame[FRAME_HEIGHT][FRAME_WIDTH];
 uint8_t vram[0x18000];
 uint8_t oam[0x400];
 uint8_t pallete_ram[0x400];
+uint8_t ppu_mmio[0x100];
 
 uint16_t reg_dispcnt;
 uint16_t reg_dispstat;
@@ -126,14 +125,13 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
     int scanline_px_rendered = 0;
 
     while (true) {
-        uint16_t screen_entry;
-        memcpy(&screen_entry, &tile_map[compute_se_idx(tile_x, tile_y, num_tiles_y == 64)], sizeof(screen_entry));
+        uint16_t screen_entry = *(uint16_t *)(tile_map + compute_se_idx(tile_x, tile_y, num_tiles_y == 64));
 
         int tile_id = screen_entry & 0x3FF;
         uint8_t *tile = tile_set + (tile_id * (0x20 << color_pallete));
         uint8_t pallete_bank = (((screen_entry >> 0xC) & 0xF) << 4); // only used in 4bpp
 
-        bool horizontal_flip = (screen_entry >> 0xA) & 1;
+        bool horizontal_flip = (screen_entry >> 0xA) & 1;  
         bool vertical_flip = (screen_entry >> 0xB) & 1;
 
         int tile_row_to_render = (reg_vcount - (reg_vcount & ~7));
@@ -142,26 +140,24 @@ static void render_text_bg(uint16_t reg_bgcnt, uint16_t reg_bghofs, uint16_t reg
         int start, end, step;
 
         if (horizontal_flip) {
-            start = bpp - 1;
+            start = 3;
             end = -1;
             step = -1;
         } else {
             start = 0;
-            end = bpp;
+            end = 4;
             step = 1;
         }
 
-        if (color_pallete) {
-            printf("unimplemented: color pallete bit set\n");
-            exit(1);
-        } else {
-            for (int i = start; i != end; i += step) {
-                for (int nibble = horizontal_flip; nibble != (!horizontal_flip + step); nibble += step) {
-                    if (scanline_px_rendered >= FRAME_WIDTH) return;
+        for (int i = start; i != end; i += step) {
+            for (int nibble = horizontal_flip; nibble != (!horizontal_flip + step); nibble += step) {
+                if (scanline_px_rendered >= FRAME_WIDTH) return;
 
-                    uint8_t pallete_id = pallete_bank | ((tile[i] >> (nibble * 4)) & 0x0F);
-                    memcpy(&frame[reg_vcount][scanline_px_rendered++], pallete_ram + (pallete_id * sizeof(Pixel)), sizeof(Pixel));
-                }
+                int px = i * 2 + nibble;
+                if (!scanline_px_rendered && (px < (scroll_x - (scroll_x & ~7)))) continue;
+
+                uint8_t pallete_id = color_pallete ? tile[px] : pallete_bank | ((tile[i] >> (nibble * 4)) & 0x0F);
+                frame[reg_vcount][scanline_px_rendered++] = *(uint16_t *)(pallete_ram + (pallete_id * sizeof(Pixel)));
             }
         }
 
@@ -173,7 +169,7 @@ static void render_scanline(void) {
     // used to manage rendering priorities
     if (DCNT_BLANK) {
         for (int row = 0; row < FRAME_WIDTH; row++) 
-            frame[reg_vcount][row] = WHITE_PIXEL;
+            frame[reg_vcount][row] = 0xFFFF;
         return;
     }
 
@@ -221,7 +217,7 @@ static void render_scanline(void) {
                     vram_base_ptr += 0xA000;
 
                 for (int col = 0; col < FRAME_WIDTH; col++) // pixels for the frame are stored directly in vram
-                    memcpy(&frame[reg_vcount][col], vram + (reg_vcount * (FRAME_WIDTH * sizeof(Pixel))) + (col * sizeof(Pixel)), sizeof(Pixel));
+                    frame[reg_vcount][col] = *(uint16_t *)(vram + (reg_vcount * (FRAME_WIDTH * sizeof(Pixel))) + (col * sizeof(Pixel)));
             }
             break;
         case 0x4:
@@ -234,7 +230,7 @@ static void render_scanline(void) {
                     // each byte in vram is interpreted as a pallete index holding a pixels color
                     uint8_t pallete_idx = *(vram_base_ptr + (reg_vcount * FRAME_WIDTH) + col);
                     // copy the 15bpp color to the associated pixel on the frame
-                    memcpy(&frame[reg_vcount][col], &pallete_ram[pallete_idx * sizeof(Pixel)], sizeof(Pixel));
+                    frame[reg_vcount][col] = *(uint16_t *)(pallete_ram + pallete_idx * sizeof(Pixel));
                 }
             }
             break;
@@ -248,7 +244,7 @@ static void render_scanline(void) {
         }
     } else {
         for (int i = 0; i < 240; i++) // no rendering bits enabled: render backdrop (first entry in pallete RAM)
-            memcpy(&frame[reg_vcount][i], pallete_ram, sizeof(Pixel));
+            frame[reg_vcount][i] = *(uint16_t *)pallete_ram;
     }
 }
 

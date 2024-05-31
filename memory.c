@@ -3,17 +3,15 @@
 #include <string.h>
 #include "memory.h"
 
-// https://gbadev.net/gbadoc/memory.html
-// for more detail into the memory regions / mappings
+uint8_t bios[0x4000];
+uint8_t external_wram[0x40000];
+uint8_t internal_wram[0x8000];
+uint8_t rom[0x2000000];
 
-// ARM does not support misaligned addresses
-// https://problemkaputt.de/gbatek.htm#armcpumemoryalignments
-#define FORCE_MEMORY_ALIGN(addr, access_size) switch (access_size) { \
-                                              case 4: addr &= ~0x3; break; \
-                                              case 2: addr &= ~0x1; break; \
-                                              }
+uint16_t reg_ime;
+uint16_t reg_keyinput;
 
-void load_bios(Memory *mem, char *bios_file) {
+void load_bios(char *bios_file) {
     FILE *fp = fopen(bios_file, "rb");
     if (fp == NULL) {
         fprintf(stderr, "ERROR: file (%s) failed to open\n", bios_file);
@@ -24,12 +22,12 @@ void load_bios(Memory *mem, char *bios_file) {
     size_t size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    fread(mem->bios, sizeof(uint8_t), size, fp);
+    fread(bios, sizeof(uint8_t), size, fp);
     
     fclose(fp);
 }
 
-void load_rom(Memory *mem, char *rom_file) {
+void load_rom(char *rom_file) {
     FILE *fp = fopen(rom_file, "rb");
     if (fp == NULL) {
         fprintf(stderr, "ERROR: file (%s) failed to open\n", rom_file);
@@ -40,83 +38,125 @@ void load_rom(Memory *mem, char *rom_file) {
     size_t size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    fread(mem->rom, sizeof(uint8_t), size, fp);
+    fread(rom, sizeof(uint8_t), size, fp);
     
     fclose(fp);
 }
 
-Memory* init_mem(const char *bios_file, const char *rom_file) {
-    Memory *mem = (Memory *)calloc(1, sizeof(Memory));
-    if (mem == NULL) {
-        fprintf(stderr, "unable to allocate more memory!\n");
-        exit(1);
-    }
-
-    load_bios(mem, bios_file);
-    load_rom(mem, rom_file);
-
-    return mem;
-}
-
-uint32_t read_mem(Memory *mem, uint32_t addr, size_t access_size) {
-    FORCE_MEMORY_ALIGN(addr, access_size)
-
-    uint32_t word = 0;
+uint32_t read_word(uint32_t addr) {
+    addr &= ~3;
 
     switch ((addr >> 24) & 0xFF) {
-    case 0x00:
-        memcpy(&word, mem->bios + addr, access_size);
-        break;
-    case 0x02:
-        memcpy(&word, mem->external_wram + ((addr - 0x02000000) & 0x3FFFF), access_size);
-        break;
-    case 0x03:
-        memcpy(&word, mem->internal_wram + ((addr - 0x03000000) & 0x7FFF), access_size);
-        break;
+    case 0x00: return *(uint32_t *)(bios + addr);
+    case 0x02: return *(uint32_t *)(external_wram + ((addr - 0x02000000) & 0x3FFFF));
+    case 0x03: return *(uint32_t *)(internal_wram + ((addr - 0x03000000) & 0x7FFF));
     case 0x04:
         switch (addr) {
-        case 0x04000130: return mem->reg_keyinput;
+        case 0x04000130: return reg_keyinput;
         default:
             if (addr >= 0x04000000 && addr <= 0x04000054)
                 return ppu_read_register(addr);
             printf("[read] unmapped hardware register: %08X\n", addr);
             exit(1);
         }
-    case 0x05:
-        memcpy(&word, pallete_ram + ((addr - 0x05000000) & 0x3FF), access_size);
-        break;
+    case 0x05: return *(uint32_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF));
     case 0x06:
         addr = (addr - 0x06000000) & 0x1FFFF;
         if (addr >= 0x18000 && addr <= 0x1FFFF) {
-            memcpy(&word, vram + (addr - 0x8000), access_size);
+            return *(uint32_t *)(vram + (addr - 0x8000));
         } else {
-            memcpy(&word, vram + addr, access_size);
+            return *(uint32_t *)(vram + addr);
         }
-        break;
-    case 0x07:
-        memcpy(&word, oam + ((addr - 0x07000000) & 0x3FF), access_size);
-        break;
+    case 0x07: return *(uint32_t *)(oam + ((addr - 0x07000000) & 0x3FF));
     case 0x08:
     case 0x09:
     case 0x0A:
     case 0x0B:
     case 0x0C:
-    case 0x0D:
-        memcpy(&word, mem->rom + ((addr - 0x08000000) & 0x1FFFFFF), access_size);
-        break;
+    case 0x0D: return *(uint32_t *)(rom + ((addr - 0x08000000) & 0x1FFFFFF));
+    case 0x0E:
+        printf("cart ram\n");
+        exit(1);
+    }
+
+    return 0;
+}
+
+uint16_t read_halfword(uint32_t addr) {
+    addr &= ~1;
+
+    switch ((addr >> 24) & 0xFF) {
+    case 0x00: return *(uint16_t *)(bios + addr);
+    case 0x02: return *(uint16_t *)(external_wram + ((addr - 0x02000000) & 0x3FFFF));
+    case 0x03: return *(uint16_t *)(internal_wram + ((addr - 0x03000000) & 0x7FFF));
+    case 0x04:
+        switch (addr) {
+        case 0x04000130: return reg_keyinput;
+        default:
+            if (addr >= 0x04000000 && addr <= 0x04000054)
+                return ppu_read_register(addr);
+            printf("[read] unmapped hardware register: %08X\n", addr);
+            exit(1);
+        }
+    case 0x05: return *(uint16_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF));
+    case 0x06:
+        addr = (addr - 0x06000000) & 0x1FFFF;
+        if (addr >= 0x18000 && addr <= 0x1FFFF) {
+            return *(uint16_t *)(vram + (addr - 0x8000));
+        } else {
+            return *(uint16_t *)(vram + addr);
+        }
+    case 0x07: return *(uint16_t *)(oam + ((addr - 0x07000000) & 0x3FF));
+    case 0x08:
+    case 0x09:
+    case 0x0A:
+    case 0x0B:
+    case 0x0C:
+    case 0x0D: return *(uint16_t *)(rom + ((addr - 0x08000000) & 0x1FFFFFF));
+    case 0x0E:
+        printf("cart ram\n");
+        exit(1);
+    }
+
+    return 0;
+}
+
+uint8_t read_byte(uint32_t addr) {
+    switch ((addr >> 24) & 0xFF) {
+    case 0x00: return bios[addr];
+    case 0x02: return external_wram[(addr - 0x02000000) & 0x3FFFF];
+    case 0x03: return internal_wram[(addr - 0x03000000) & 0x7FFF];
+    case 0x04:
+        switch (addr) {
+        case 0x04000130: return reg_keyinput;
+        default:
+            if (addr >= 0x04000000 && addr <= 0x04000054)
+                return ppu_read_register(addr);
+            printf("[read] unmapped hardware register: %08X\n", addr);
+            exit(1);
+        }
+    case 0x05: return pallete_ram[(addr - 0x05000000) & 0x3FF];
+    case 0x06:
+        addr = (addr - 0x06000000) & 0x1FFFF;
+        if (addr >= 0x18000) addr -= 0x8000;
+        return vram[addr];
+    case 0x07: return oam[(addr - 0x07000000) & 0x3FF];
+    case 0x08:
+    case 0x09:
+    case 0x0A:
+    case 0x0B:
+    case 0x0C:
+    case 0x0D: return rom[(addr - 0x08000000) & 0x1FFFFFF];
     case 0x0E:
         printf("cart ram\n");
         exit(1); 
     }
 
-    return word;
+    return 0;
 }
 
-// TODO: depending on profiling in the future an easy optimization
-// could be to create a seperate write_byte function to handle the edge cases
-// and reduce the amount of branching for each instruction
-void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
-    FORCE_MEMORY_ALIGN(addr, access_size);
+void write_word(uint32_t addr, uint32_t word) {
+    addr &= ~3;
 
     static void *jump_table[] = {
         &&illegal_write, &&illegal_write, &&external_wram_reg, &&internal_wram_reg,
@@ -130,21 +170,21 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
     illegal_write: return;
 
     external_wram_reg:
-        memcpy(mem->external_wram + ((addr - 0x02000000) & 0x3FFFF), &val, access_size);
+        *(uint32_t *)(external_wram + ((addr - 0x02000000) & 0x3FFFF)) = word;
         return;
     
     internal_wram_reg:
-        memcpy(mem->internal_wram + ((addr - 0x03000000) & 0x7FFF), &val, access_size);
+        *(uint32_t *)(internal_wram + ((addr - 0x03000000) & 0x7FFF)) = word;
         return;
 
     mapped_registers:
         switch (addr) {
         case 0x04000208:
-            memcpy(&mem->reg_ime, &val, access_size);
+            reg_ime = word;
             break;
         default:
             if (addr >= 0x04000000 && addr <= 0x04000054) {
-                ppu_set_register(addr, val);
+                ppu_set_register(addr, word);
             } else {
                 printf("[write] unmapped hardware register: %08X\n", addr);
                 exit(1);
@@ -153,42 +193,144 @@ void write_mem(Memory *mem, uint32_t addr, uint32_t val, size_t access_size) {
         return;
 
     pallete_ram_reg:
-        if (access_size == 1) {
-            val = (val << 8) | val;
-            access_size = 2;
-        }
-        memcpy(pallete_ram + ((addr - 0x05000000) & 0x3FF), &val, access_size);
+        *(uint32_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF)) = word;
         return;
 
     vram_reg:
         addr = (addr - 0x06000000) & 0x1FFFF;
-        if (addr >= 0x18000 && addr <= 0x1FFFF) addr -= 0x8000;
-
-        if (access_size == 1) {
-            // byte writes to obj vram are ignored
-            if (addr >= 0x14000) return;
-
-            uint32_t bg_vram_size = 0x10000;
-            if (is_rendering_bitmap())
-                bg_vram_size = 0x14000;
-
-            // byte writes to bg vram are duplicated across the halfword
-            if (addr < bg_vram_size) {
-                val = (val << 8) | val;
-                access_size = 2;
-            } else {
-                return;
-            }
-        }
-
-        memcpy(vram + addr, &val, access_size);
+        if (addr >= 0x18000) addr -= 0x8000;
+        *(uint32_t *)(vram + addr) = word;
         return;
 
     oam_reg:
-        if (access_size != 1) // OAM byte stores should be ignored
-            memcpy(oam + ((addr - 0x07000000) & 0x3FF), &val, access_size);
+        *(uint32_t *)(oam + ((addr - 0x07000000) & 0x3FF)) = word;
         return;
     
+    cart_ram_reg:
+        printf("cart ram write unhandled\n");
+        exit(1);
+}
+
+void write_halfword(uint32_t addr, uint16_t halfword) {
+    addr &= ~1;
+
+    static void *jump_table[] = {
+        &&illegal_write, &&illegal_write, &&external_wram_reg, &&internal_wram_reg,
+        &&mapped_registers, &&pallete_ram_reg, &&vram_reg, &&oam_reg, &&illegal_write,
+        &&illegal_write, &&illegal_write, &&illegal_write, &&illegal_write, &&illegal_write,
+        &&cart_ram_reg, &&cart_ram_reg
+    };
+
+    goto *jump_table[(addr >> 24) & 0xF];
+
+    illegal_write: return;
+
+    external_wram_reg:
+        *(uint16_t *)(external_wram + ((addr - 0x02000000) & 0x3FFFF)) = halfword;
+        return;
+    
+    internal_wram_reg:
+        *(uint16_t *)(internal_wram + ((addr - 0x03000000) & 0x7FFF)) = halfword;
+        return;
+
+    mapped_registers:
+        switch (addr) {
+        case 0x04000208:
+            reg_ime = halfword;
+            break;
+        default:
+            if (addr >= 0x04000000 && addr <= 0x04000054) {
+                ppu_set_register(addr, halfword);
+            } else {
+                printf("[write] unmapped hardware register: %08X\n", addr);
+                exit(1);
+            }
+        }
+        return;
+
+    pallete_ram_reg:
+        *(uint16_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF)) = halfword;
+        return;
+
+    vram_reg:
+        addr = (addr - 0x06000000) & 0x1FFFF;
+        if (addr >= 0x18000) addr -= 0x8000;
+        *(uint16_t *)(vram + addr) = halfword;
+        return;
+
+    oam_reg:
+        *(uint16_t *)(oam + ((addr - 0x07000000) & 0x3FF)) = halfword;
+        return;
+    
+    cart_ram_reg:
+        printf("cart ram write unhandled\n");
+        exit(1);
+}
+
+void write_byte(uint32_t addr, uint8_t byte) {
+    static void *jump_table[] = {
+        &&illegal_write, &&illegal_write, &&external_wram_reg, &&internal_wram_reg,
+        &&mapped_registers, &&pallete_ram_reg, &&vram_reg, &&oam_reg, &&illegal_write,
+        &&illegal_write, &&illegal_write, &&illegal_write, &&illegal_write, &&illegal_write,
+        &&cart_ram_reg, &&cart_ram_reg
+    };
+
+    goto *jump_table[(addr >> 24) & 0xF];
+
+    illegal_write: return;
+
+    external_wram_reg:
+        external_wram[(addr - 0x02000000) & 0x3FFFF] = byte;
+        return;
+    
+    internal_wram_reg:
+        internal_wram[(addr - 0x03000000) & 0x7FFF] = byte;
+        return;
+
+    mapped_registers:
+        switch (addr) {
+        case 0x04000208:
+            reg_ime = byte;
+            break;
+        default:
+            if (addr >= 0x04000000 && addr <= 0x04000054) {
+                ppu_set_register(addr, byte);
+            } else {
+                printf("[write] unmapped hardware register: %08X\n", addr);
+                exit(1);
+            }
+        }
+        return;
+
+    // byte writes to pallete ram are ignored
+    pallete_ram_reg: {
+        uint16_t duplicated_halfword = (byte << 8) | byte;
+        *(uint16_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF)) = duplicated_halfword;
+        return;
+    }
+
+    vram_reg: {
+        addr = (addr - 0x06000000) & 0x1FFFF;
+        if (addr >= 0x18000) addr -= 0x8000;
+
+        // byte writes to obj vram are ignored
+        if (addr >= 0x14000) return;
+
+        uint32_t bg_vram_size = 0x10000;
+        if (is_rendering_bitmap())
+            bg_vram_size = 0x14000;
+
+        // byte writes to bg vram are duplicated across the halfword
+        if (addr < bg_vram_size) {
+            uint16_t duplicated_halfword = (byte << 8) | byte;
+            *(uint16_t *)(vram + addr) = duplicated_halfword;
+        }
+        return;
+    }
+
+    // byte writes to oam are ignored
+    oam_reg: return;
+
     cart_ram_reg:
         printf("cart ram write unhandled\n");
         exit(1);
