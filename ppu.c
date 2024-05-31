@@ -75,27 +75,9 @@ uint8_t pallete_ram[0x400];
 uint8_t ppu_mmio[0x56];
 
 uint8_t reg_vcount = 0;
-
-uint16_t reg_win0h;
-uint16_t reg_win0v;
-
-uint16_t reg_win1h;
-uint16_t reg_win1v;
-
-uint16_t reg_winin;
-uint16_t reg_winout;
-
-uint16_t reg_mosaic;
-uint16_t reg_bldcnt;
-uint16_t reg_bldalpha;
-uint16_t reg_bldy;
+bool is_rendering_bitmap = false;
 
 int cycles = 0;
-
-bool is_rendering_bitmap(void) {
-    uint8_t mode = (REG_DISPCNT >> 8) & 0x1F;
-    return (mode == 0x3) || (mode == 0x4) || (mode == 0x5);
-}
 
 // referenced from https://www.coranac.com/tonc/text/regbg.htm
 // terms here are multiplied by 2 since each screen entry is 2 bytes (uint16_t)
@@ -196,23 +178,23 @@ static void render_scanline(void) {
                 render_text_bg(REG_BG0CNT, REG_BG0HOFS, REG_BG0VOFS);
             }
 
-            // int bg1_prio = BGCNT_PRIO(reg_bg1cnt);
-            // if (DCNT_BG1 && (bg1_prio > prio)) {
-            //     prio = bg1_prio;
-            //     render_text_bg(reg_bg1cnt, reg_bg1hofs, reg_bg1vofs);
-            // }
+            int bg1_prio = BGCNT_PRIO(REG_BG1CNT);
+            if (DCNT_BG1 && (bg1_prio > prio)) {
+                prio = bg1_prio;
+                render_text_bg(REG_BG1CNT, REG_BG1HOFS, REG_BG1VOFS);
+            }
 
-            // int bg2_prio = BGCNT_PRIO(reg_bg2cnt);
-            // if (DCNT_BG2 && (bg2_prio > prio)) {
-            //     prio = bg2_prio;
-            //     render_text_bg(reg_bg2cnt, reg_bg2hofs, reg_bg2vofs);
-            // }
+            int bg2_prio = BGCNT_PRIO(REG_BG2CNT);
+            if (DCNT_BG2 && (bg2_prio > prio)) {
+                prio = bg2_prio;
+                render_text_bg(REG_BG2CNT, REG_BG2HOFS, REG_BG2VOFS);
+            }
 
-            // int bg3_prio = BGCNT_PRIO(reg_bg3cnt);
-            // if (DCNT_BG3 && (bg3_prio > prio)) {
-            //     prio = bg3_prio;
-            //     render_text_bg(reg_bg3cnt, reg_bg3hofs, reg_bg3vofs);
-            // } 
+            int bg3_prio = BGCNT_PRIO(REG_BG3CNT);
+            if (DCNT_BG3 && (bg3_prio > prio)) {
+                prio = bg3_prio;
+                render_text_bg(REG_BG3CNT, REG_BG3HOFS, REG_BG3VOFS);
+            } 
             break;
         }
         case 0x1:

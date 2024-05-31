@@ -178,9 +178,14 @@ void write_word(uint32_t addr, uint32_t word) {
 
     mapped_registers:
         switch (addr) {
+        case 0x04000000:
+            *(uint32_t *)ppu_mmio = word;
+            uint8_t mode = (*ppu_mmio >> 8) & 0x1F;
+            is_rendering_bitmap = mode == 3 | mode == 4 | mode == 5;
+            return;
         case 0x04000208:
             reg_ime = word;
-            break;
+            return;
         default:
             if (addr >= 0x04000000 && addr <= 0x04000054) {
                 *(uint32_t *)(ppu_mmio + (addr - 0x04000000)) = word;
@@ -189,7 +194,6 @@ void write_word(uint32_t addr, uint32_t word) {
                 exit(1);
             }
         }
-        return;
 
     pallete_ram_reg:
         *(uint32_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF)) = word;
@@ -234,9 +238,15 @@ void write_halfword(uint32_t addr, uint16_t halfword) {
 
     mapped_registers:
         switch (addr) {
+        case 0x04000000: {
+            *(uint16_t *)ppu_mmio = halfword;
+            uint8_t mode = (*ppu_mmio >> 8) & 0x1F;
+            is_rendering_bitmap = mode == 3 | mode == 4 | mode == 5;
+            return;
+        }
         case 0x04000208:
             reg_ime = halfword;
-            break;
+            return;
         default:
             if (addr >= 0x04000000 && addr <= 0x04000054) {
                 *(uint16_t *)(ppu_mmio + (addr - 0x04000000)) = halfword;
@@ -245,7 +255,6 @@ void write_halfword(uint32_t addr, uint16_t halfword) {
                 exit(1);
             }
         }
-        return;
 
     pallete_ram_reg:
         *(uint16_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF)) = halfword;
@@ -316,8 +325,7 @@ void write_byte(uint32_t addr, uint8_t byte) {
         if (addr >= 0x14000) return;
 
         uint32_t bg_vram_size = 0x10000;
-        if (is_rendering_bitmap())
-            bg_vram_size = 0x14000;
+        if (is_rendering_bitmap) bg_vram_size = 0x14000;
 
         // byte writes to bg vram are duplicated across the halfword
         if (addr < bg_vram_size) {

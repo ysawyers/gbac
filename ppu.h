@@ -9,12 +9,10 @@ extern uint8_t vram[0x18000];
 extern uint8_t oam[0x400];
 extern uint8_t pallete_ram[0x400];
 extern uint8_t ppu_mmio[0x56];
-
 extern uint8_t reg_vcount;
 
-void tick_ppu(void);
+extern bool is_rendering_bitmap;
 
-// used externally to check if ppu is rendering a bitmap from vram
-bool is_rendering_bitmap(void);
+void tick_ppu(void);
 
 #endif
