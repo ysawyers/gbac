@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include "memory.h"
 
 uint8_t bios[0x4000];
@@ -52,10 +51,10 @@ uint32_t read_word(uint32_t addr) {
     case 0x03: return *(uint32_t *)(internal_wram + ((addr - 0x03000000) & 0x7FFF));
     case 0x04:
         switch (addr) {
+        case 0x04000006: return reg_vcount;
         case 0x04000130: return reg_keyinput;
         default:
-            if (addr >= 0x04000000 && addr <= 0x04000054)
-                return ppu_read_register(addr);
+            if (addr >= 0x04000000 && addr <= 0x04000054) return *(uint32_t *)(ppu_mmio + (addr - 0x04000000));
             printf("[read] unmapped hardware register: %08X\n", addr);
             exit(1);
         }
@@ -91,10 +90,10 @@ uint16_t read_halfword(uint32_t addr) {
     case 0x03: return *(uint16_t *)(internal_wram + ((addr - 0x03000000) & 0x7FFF));
     case 0x04:
         switch (addr) {
+        case 0x04000006: return reg_vcount;
         case 0x04000130: return reg_keyinput;
         default:
-            if (addr >= 0x04000000 && addr <= 0x04000054)
-                return ppu_read_register(addr);
+            if (addr >= 0x04000000 && addr <= 0x04000054) return *(uint16_t *)(ppu_mmio + (addr - 0x04000000));
             printf("[read] unmapped hardware register: %08X\n", addr);
             exit(1);
         }
@@ -128,10 +127,10 @@ uint8_t read_byte(uint32_t addr) {
     case 0x03: return internal_wram[(addr - 0x03000000) & 0x7FFF];
     case 0x04:
         switch (addr) {
+        case 0x04000006: return reg_vcount;
         case 0x04000130: return reg_keyinput;
         default:
-            if (addr >= 0x04000000 && addr <= 0x04000054)
-                return ppu_read_register(addr);
+            if (addr >= 0x04000000 && addr <= 0x04000054) return ppu_mmio[addr];
             printf("[read] unmapped hardware register: %08X\n", addr);
             exit(1);
         }
@@ -184,7 +183,7 @@ void write_word(uint32_t addr, uint32_t word) {
             break;
         default:
             if (addr >= 0x04000000 && addr <= 0x04000054) {
-                ppu_set_register(addr, word);
+                *(uint32_t *)(ppu_mmio + (addr - 0x04000000)) = word;
             } else {
                 printf("[write] unmapped hardware register: %08X\n", addr);
                 exit(1);
@@ -240,7 +239,7 @@ void write_halfword(uint32_t addr, uint16_t halfword) {
             break;
         default:
             if (addr >= 0x04000000 && addr <= 0x04000054) {
-                ppu_set_register(addr, halfword);
+                *(uint16_t *)(ppu_mmio + (addr - 0x04000000)) = halfword;
             } else {
                 printf("[write] unmapped hardware register: %08X\n", addr);
                 exit(1);
@@ -294,7 +293,7 @@ void write_byte(uint32_t addr, uint8_t byte) {
             break;
         default:
             if (addr >= 0x04000000 && addr <= 0x04000054) {
-                ppu_set_register(addr, byte);
+                *(ppu_mmio + (addr - 0x04000000)) = byte;
             } else {
                 printf("[write] unmapped hardware register: %08X\n", addr);
                 exit(1);
@@ -305,7 +304,7 @@ void write_byte(uint32_t addr, uint8_t byte) {
     // byte writes to pallete ram are ignored
     pallete_ram_reg: {
         uint16_t duplicated_halfword = (byte << 8) | byte;
-        *(uint16_t *)(pallete_ram + ((addr - 0x05000000) & 0x3FF)) = duplicated_halfword;
+        *(uint16_t *)(pallete_ram + (((addr - 0x05000000) & 0x3FF) & ~1)) = duplicated_halfword;
         return;
     }
 
@@ -323,7 +322,7 @@ void write_byte(uint32_t addr, uint8_t byte) {
         // byte writes to bg vram are duplicated across the halfword
         if (addr < bg_vram_size) {
             uint16_t duplicated_halfword = (byte << 8) | byte;
-            *(uint16_t *)(vram + addr) = duplicated_halfword;
+            *(uint16_t *)(vram + (addr & ~1)) = duplicated_halfword;
         }
         return;
     }
