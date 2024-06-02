@@ -109,7 +109,7 @@ int main(int argc, char **argv) {
                 break;
             }
         }
-
+        
         sdl_render_frame(renderer, compute_frame(key_input));
     }
 
